@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Attendance</title>
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="css/att.css?v=0.1.0">
+</head>
+<body class="loading">
+
+<!-- ===== KIOSK (default screen) ===== -->
+<section id="kiosk" class="view open">
+  <div class="cam">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+    <div id="hint" class="hint">Starting camera…</div>
+  </div>
+
+  <div id="card" class="card hidden">
+    <img id="cardImg" alt="">
+    <div class="cardBody">
+      <div id="cardName" class="cardName"></div>
+      <div id="cardLine" class="cardLine"></div>
+      <button id="cardFlip" class="btn ghost small">Wrong direction?</button>
+    </div>
+  </div>
+
+  <div class="bar">
+    <div class="barLeft">
+      <div id="siteName" class="siteName">—</div>
+      <div id="clock" class="clock">--:--</div>
+    </div>
+    <div class="barRight">
+      <div id="syncDot" class="syncDot" title="sync"></div>
+      <button id="btnPin" class="btn big">Use PIN</button>
+      <button id="btnMgr" class="btn icon" aria-label="Manager">&#9881;</button>
+    </div>
+  </div>
+</section>
+
+<!-- ===== KEYPAD SHEET (staff PIN + manager PIN) ===== -->
+<section id="keypad" class="sheet">
+  <div class="sheetBox">
+    <div id="kpTitle" class="kpTitle">Enter PIN</div>
+    <div id="kpDots" class="kpDots"></div>
+    <div class="kpGrid">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="x" class="kpX">Cancel</button><button data-k="0">0</button><button data-k="b" class="kpB">&#9003;</button>
+    </div>
+  </div>
+</section>
+
+<!-- ===== MANAGER ===== -->
+<section id="mgr" class="view">
+  <header class="mgrHead">
+    <button id="btnBack" class="btn">&larr; Kiosk</button>
+    <div class="mgrTitle">Manager</div>
+    <nav class="tabs">
+      <button data-tab="enrol" class="tab on">Enrol</button>
+      <button data-tab="staff" class="tab">Staff</button>
+      <button data-tab="log" class="tab">Log</button>
+      <button data-tab="settings" class="tab">Settings</button>
+    </nav>
+  </header>
+
+  <div id="tab-enrol" class="panel on">
+    <div class="split">
+      <div class="col">
+        <label>Staff member</label>
+        <input id="enSearch" type="search" placeholder="Search name…" autocomplete="off">
+        <div id="enList" class="list"></div>
+      </div>
+      <div class="col">
+        <div id="enWho" class="enWho">Pick a staff member on the left.</div>
+        <div class="enCam"><video id="enVideo" autoplay muted playsinline></video></div>
+        <div id="enSamples" class="samples"></div>
+        <div class="row">
+          <button id="enCapture" class="btn primary" disabled>Capture sample</button>
+          <button id="enClear" class="btn ghost" disabled>Clear samples</button>
+        </div>
+        <div class="row">
+          <button id="enPin" class="btn" disabled>Set PIN</button>
+          <span id="enPinState" class="muted"></span>
+        </div>
+        <label class="check"><input id="enConsent" type="checkbox" disabled> Employee agrees to the storage of a face template for attendance.</label>
+        <button id="enSave" class="btn primary wide" disabled>Save enrolment</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-staff" class="panel">
+    <div class="row">
+      <button id="stRefresh" class="btn">Refresh roster from server</button>
+      <span id="stInfo" class="muted"></span>
+    </div>
+    <table class="tbl" id="stTable"><thead><tr><th>Name</th><th>Samples</th><th>PIN</th><th>Active</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div id="tab-log" class="panel">
+    <div class="row">
+      <input id="logDay" type="date">
+      <button id="logManual" class="btn">Manual punch</button>
+      <button id="logSync" class="btn">Sync now</button>
+      <span id="logInfo" class="muted"></span>
+    </div>
+    <table class="tbl" id="logTable"><thead><tr><th></th><th>Staff</th><th>Time</th><th>Dir</th><th>Via</th><th>Sync</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div id="tab-settings" class="panel">
+    <div class="form">
+      <label>Site <select id="setSite"></select></label>
+      <label>Device name <input id="setDevice" placeholder="e.g. La Una gate tablet"></label>
+      <label>API URL <input id="setUrl" placeholder="https://…"></label>
+      <label>API key <input id="setKey" type="password"></label>
+      <div class="row">
+        <button id="setSave" class="btn primary">Save</button>
+        <button id="setSync" class="btn">Sync now</button>
+        <button id="setRoster" class="btn">Refresh roster</button>
+        <button id="setRestore" class="btn">Restore enrolments from server</button>
+      </div>
+      <div class="row">
+        <button id="setMgrPin" class="btn">Change manager PIN</button>
+        <button id="setFull" class="btn">Full screen</button>
+        <button id="setReset" class="btn danger">Reset device</button>
+      </div>
+      <pre id="setInfo" class="info"></pre>
+    </div>
+  </div>
+</section>
+
+<!-- manual punch dialog -->
+<section id="manual" class="sheet">
+  <div class="sheetBox wide">
+    <div class="kpTitle">Manual punch</div>
+    <input id="mnSearch" type="search" placeholder="Search name…" autocomplete="off">
+    <div id="mnList" class="list"></div>
+    <div class="row">
+      <button id="mnIn" class="btn primary" disabled>Clock IN</button>
+      <button id="mnOut" class="btn primary" disabled>Clock OUT</button>
+      <button id="mnCancel" class="btn ghost">Cancel</button>
+    </div>
+  </div>
+</section>
+
+<div id="toast" class="toast"></div>
+<canvas id="snap" hidden></canvas>
+
+<script src="vendor/face-api.js"></script>
+<script src="js/config.js?v=0.1.0"></script>
+<script src="js/db.js?v=0.1.0"></script>
+<script src="js/face.js?v=0.1.0"></script>
+<script src="js/sync.js?v=0.1.0"></script>
+<script src="js/app.js?v=0.1.0"></script>
+</body>
+</html>
