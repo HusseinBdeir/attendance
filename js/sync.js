@@ -51,7 +51,7 @@ const Sync = (() => {
         snapshot: p.snapshot || "", note: p.note || "",
       })),
       faces: faces.map(f => ({
-        id: f.id, staffId: f.staffId, sample: f.sample, descriptor: f.d || [], consentAt: f.consentAt || "",
+        id: f.id, staffId: f.staffId, staffName: (f.staffName || ""), sample: f.sample, descriptor: f.d || [], consentAt: f.consentAt || "",
         pinhash: f.pinhash || "", ts: f.ts,
       })),
     });

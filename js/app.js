@@ -347,8 +347,8 @@
     // replace previous samples for this person
     for (const f of state.faces.filter(f => f.staffId === e.staffId)) await DBX.deleteFace(f.id);
     state.faces = state.faces.filter(f => f.staffId !== e.staffId);
-    const rows = e.samples.map((s, i) => ({ id: uuid(), staffId: e.staffId, d: s.d, sample: i + 1, consentAt, pinhash, ts: new Date().toISOString(), device, synced: 0 }));
-    if (!rows.length && e.pin) rows.push({ id: uuid(), staffId: e.staffId, d: [], sample: 0, consentAt: "", pinhash, ts: new Date().toISOString(), device, synced: 0 });
+    const rows = e.samples.map((s, i) => ({ id: uuid(), staffId: e.staffId, staffName: st.name, d: s.d, sample: i + 1, consentAt, pinhash, ts: new Date().toISOString(), device, synced: 0 }));
+    if (!rows.length && e.pin) rows.push({ id: uuid(), staffId: e.staffId, staffName: st.name, d: [], sample: 0, consentAt: "", pinhash, ts: new Date().toISOString(), device, synced: 0 });
     for (const r of rows) await DBX.saveFace(r);
     state.faces.push(...rows.filter(r => r.d.length === 128));
     if (e.pin) { st.pinhash = e.pin.hash; await DBX.saveStaff(st); }
