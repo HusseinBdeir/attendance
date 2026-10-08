@@ -366,6 +366,7 @@
     state.mgrOpen = true; state.busy = true; state.live = null;
     drawOverlay(null);
     $("kiosk").classList.remove("open"); $("mgr").classList.add("open");
+    { const v = $("enVideo"); if (v.srcObject && v.paused) v.play().catch(() => {}); }
     showTab("enrol"); renderEnrolList(""); renderStaff(); renderSettings();
     $("logDay").value = nowLocal().day; renderLog();
     if (state.defaultPin) toast("Manager PIN is still the factory default — change it in Settings", true, 5000);
@@ -388,6 +389,46 @@
     if (t.dataset.tab === "staff") renderStaff();
     if (t.dataset.tab === "settings") renderSettings();
   }));
+
+
+  // ---------- pose pictograms (enrolment guide; mirrored-preview sense) ----------
+  // A head outline with the features shifted the way the face turns, plus a pulsing
+  // arrow on the side to turn to. Plain shapes, no text: usable without reading.
+  function poseSvg(kind) {
+    const head = (dx, dy, mouth) => `<circle cx="50" cy="52" r="26" fill="none" stroke="#f8fafc" stroke-width="4"/>` +
+      `<circle cx="${41 + dx}" cy="${46 + dy}" r="3.2" fill="#f8fafc"/><circle cx="${59 + dx}" cy="${46 + dy}" r="3.2" fill="#f8fafc"/>` +
+      `<path d="M${50 + dx * 1.5} ${47 + dy} v9 h${dx >= 0 ? 5 : -5}" fill="none" stroke="#f8fafc" stroke-width="3" stroke-linecap="round"/>` +
+      (mouth || `<path d="M${42 + dx} ${64 + dy} h16" fill="none" stroke="#f8fafc" stroke-width="3.5" stroke-linecap="round"/>`);
+    const arrow = (d, dx, dy) => `<g class="arrow" style="--dx:${dx}px;--dy:${dy}px"><path d="${d}" fill="none" stroke="#c9a227" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></g>`;
+    const cam = `<rect x="39" y="4" width="22" height="14" rx="3" fill="#c9a227"/><circle cx="50" cy="11" r="4" fill="#0f172a"/>`;
+    let body;
+    switch (kind) {
+      case "left":  body = head(-8, 0) + arrow("M38 88 H10 M22 76 L10 88 L22 100", -7, 0); break;
+      case "right": body = head(8, 0) + arrow("M62 88 H90 M78 76 L90 88 L78 100", 7, 0); break;
+      case "up":    body = head(0, -7) + arrow("M50 24 V4 M38 16 L50 4 L62 16", 0, -6); break;
+      case "smile": body = head(0, 0, `<path d="M38 60 Q50 74 62 60" fill="none" stroke="#f8fafc" stroke-width="3.5" stroke-linecap="round"/>`) +
+                           `<path d="M14 36 l4 -4 M10 48 l5 0 M86 36 l-4 -4 M90 48 l-5 0" stroke="#c9a227" stroke-width="3" stroke-linecap="round"/>`; break;
+      case "done":  body = `<circle cx="50" cy="52" r="34" fill="none" stroke="#22c55e" stroke-width="5"/><path d="M32 54 l12 12 l26 -28" fill="none" stroke="#22c55e" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>`; break;
+      default:      body = cam + head(0, 0) + `<circle cx="50" cy="52" r="34" fill="none" stroke="#c9a227" stroke-width="2.5" stroke-dasharray="6 6"/>`;
+    }
+    return `<svg viewBox="0 0 100 104" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${body}</svg>`;
+  }
+  function poseIcon(i) { return (C.match.poseIcons || [])[i] || "straight"; }
+
+  // Enrol-side frame: a canvas copy of the hidden enrol <video>. face-api waits for a
+  // "load" event on a video whose readyState < 3 — an event a MediaStream video never
+  // fires — so detecting straight from a paused/hidden video can hang forever (the
+  // "Test recognition shows nothing" bug). A canvas is never waited on.
+  function enrolFrame() {
+    if (state.frameSource) return state.frameSource;
+    const v = $("enVideo");
+    if (v.paused && v.srcObject) v.play().catch(() => {});
+    if (v.readyState < 2 || !v.videoWidth) return null;
+    const cv = state.enFrame || (state.enFrame = document.createElement("canvas"));
+    cv.width = v.videoWidth; cv.height = v.videoHeight;
+    cv.getContext("2d").drawImage(v, 0, 0);
+    return cv;
+  }
 
   // ----- enrol -----
   function staffMatches(q) {
@@ -414,19 +455,28 @@
   }
   function renderSamples() {
     const s = state.enrol.samples;
-    const target = Math.min(C.match.maxSamples, Math.max(C.match.minSamples, C.match.poses.length - 1));
+    const target = Math.min(C.match.maxSamples, C.match.poses.length);
     $("enSamples").innerHTML = s.map(x => `<img src="${x.thumb}" alt="">`).join("") +
       Array.from({ length: Math.max(0, target - s.length) }, () => `<span class="empty"></span>`).join("");
     const ready = state.enrol.staffId && (s.length >= C.match.minSamples || (state.enrol.pin && s.length === 0));
     $("enSave").disabled = !ready;
     $("enCapture").disabled = !state.enrol.staffId || s.length >= C.match.maxSamples;
-    const pose = $("enPose");
-    if (!state.enrol.staffId) pose.textContent = "";
-    else if (s.length >= C.match.maxSamples) pose.textContent = "All samples taken — save the enrolment.";
-    else pose.textContent = `Sample ${s.length + 1} of ${target}${s.length >= target ? " (extra)" : ""}: ${C.match.poses[Math.min(s.length, C.match.poses.length - 1)]}`;
+    const pose = $("enPose"), guide = $("enGuide");
+    if (!state.enrol.staffId) { pose.textContent = ""; guide.hidden = true; guide.className = "guide"; }
+    else if (s.length >= C.match.maxSamples) {
+      pose.innerHTML = `<span class="ico">${poseSvg("done")}</span><span>All ${s.length} samples taken — save the enrolment.</span>`;
+      guide.innerHTML = poseSvg("done"); guide.className = "guide done"; guide.hidden = false;
+    } else {
+      const i = Math.min(s.length, C.match.poses.length - 1);
+      pose.innerHTML = `<span class="ico">${poseSvg(poseIcon(i))}</span><span><span class="n">${s.length + 1} / ${target}</span>${esc(C.match.poses[i])}</span>`;
+      guide.innerHTML = poseSvg(poseIcon(i)); guide.className = "guide"; guide.hidden = false;
+    }
+    guide.dataset.pose = s.length >= C.match.maxSamples ? "done" : poseIcon(Math.min(s.length, C.match.poses.length - 1));
   }
   async function captureSample(src) {
-    src = src || state.frameSource || $("enVideo");
+    if (state.enrol.samples.length >= C.match.maxSamples) { toast(`${C.match.maxSamples} samples already taken — save the enrolment`, true); return false; }
+    src = src || enrolFrame();
+    if (!src) { toast("Camera not ready — wait a second and try again", true); return false; }
     const det = await Face.detectOne(src);
     if (!det) { toast("No face found — look straight at the camera", true); return false; }
     if (det.frac < C.match.minFaceFrac) { toast("Too far — come closer to the camera", true); return false; }
@@ -494,7 +544,7 @@
     if (sep) {
       const who = state.staff.get(sep.staffId);
       const close = sep.distance < state.threshold + C.match.margin;
-      toast(`Saved ${e.samples.length} sample(s) for ${st.name} · closest other person: ${who ? who.name : "?"} at ${r3(sep.distance)}${close ? " — TOO CLOSE, re-enrol both with 5 clear samples" : " (good)"}`, close, close ? 7000 : 4000);
+      toast(`Saved ${e.samples.length} sample(s) for ${st.name} · closest other person: ${who ? who.name : "?"} at ${r3(sep.distance)}${close ? " — TOO CLOSE, re-enrol both with all 5 samples in good light" : " (good)"}`, close, close ? 7000 : 4000);
     } else toast(`Saved ${e.samples.length} sample(s) for ${st.name}`);
     state.enrol = { staffId: null, samples: [], pin: null };
     $("enWho").textContent = "Pick a staff member on the left.";
@@ -510,22 +560,29 @@
   async function testLoop() {
     if (!state.testing) return;
     const out = $("enTestOut");
+    const big = (cls, t, detail) => { out.innerHTML = `<div class="testBig ${cls}">${t}</div>` + (detail ? `<div class="testDetail">${detail}</div>` : ""); };
     try {
-      const src = state.frameSource || $("enVideo");
-      const det = await Face.detectOne(src);
-      if (!det) out.innerHTML = `<span class="muted">No face in view</span>`;
-      else if (det.frac < C.match.minFaceFrac) out.innerHTML = `<span class="muted">Face too small (${Math.round(det.frac * 100)}% of frame) — come closer</span>`;
+      if (!state.stream) await startCamera();
+      const src = enrolFrame();
+      if (!src) big("wait", "Camera starting…", state.stream ? "" : "no camera stream — check the camera permission");
       else {
-        const faces = usableFaces();
-        const m = faces.length ? Face.match(det.descriptor, faces) : null;
-        const v = Face.decide(m, state.threshold);
-        const nm = id => esc((state.staff.get(id) || {}).name || "?");
-        if (!m) out.innerHTML = `<span class="muted">No usable enrolments on this device</span>`;
-        else out.innerHTML = `<b class="${v.ok ? "ok" : "bad"}">${v.ok ? (v.weak ? "ACCEPT (weak)" : "ACCEPT") : "REJECT — " + v.reason}</b> · ${nm(m.staffId)} at <b>${r3(m.distance)}</b>` +
-          (m.runnerUp ? ` · next: ${nm(m.runnerUp.staffId)} at ${r3(m.runnerUp.distance)} (gap ${r3(m.margin)})` : " · no other enrolled person") +
-          ` · threshold ${state.threshold} · margin ${C.match.margin}`;
+        const det = await Face.detectOne(src);
+        if (!det) big("wait", "No face in view");
+        else if (det.frac < C.match.minFaceFrac) big("wait", "Come closer", `face is ${Math.round(det.frac * 100)}% of the frame, minimum ${Math.round(C.match.minFaceFrac * 100)}%`);
+        else {
+          const faces = usableFaces();
+          const m = faces.length ? Face.match(det.descriptor, faces) : null;
+          const v = Face.decide(m, state.threshold);
+          const nm = id => esc((state.staff.get(id) || {}).name || "?");
+          const reasons = { far: "no enrolled face is close enough", ambiguous: "two people are too close to tell apart", "no-enrolments": "no usable enrolments on this device" };
+          if (!m) big("bad", "✗ No usable enrolments on this device", "save at least " + C.match.minSamples + " samples for someone first");
+          else big(v.ok ? "ok" : "bad", v.ok ? `✓ ${nm(m.staffId)}${v.weak ? " (weak)" : ""}` : `✗ Not recognised`,
+            `${v.ok ? "" : (reasons[v.reason] || v.reason) + " · "}closest: ${nm(m.staffId)} at ${r3(m.distance)}` +
+            (m.runnerUp ? ` · next: ${nm(m.runnerUp.staffId)} at ${r3(m.runnerUp.distance)} (gap ${r3(m.margin)})` : " · no other enrolled person") +
+            ` · threshold ${state.threshold} · margin ${C.match.margin}`);
+        }
       }
-    } catch (e) { out.textContent = String(e.message || e); }
+    } catch (e) { big("bad", "Test error", esc(String(e.message || e))); }
     setTimeout(testLoop, 300);
   }
   function stopTest() { state.testing = false; $("enTest").textContent = "Test recognition"; $("enTestOut").innerHTML = ""; }
@@ -710,7 +767,7 @@
     descriptorsFromImage: async el => (await Face.detectAll(el)).map(r => ({ d: Array.from(r.descriptor), box: r.box, score: r.score, frac: r.frac })),
     injectDescriptor: (d, src) => handleDescriptor(new Float32Array(d), src || null),
     detectFrame: async src => { const det = await Face.detectOne(src); return det ? handleDetection(det, src) : { matched: false, reason: "no-face" }; },
-    selectEnrol, captureSample, saveEnrolment, renderLog,
+    selectEnrol, captureSample, saveEnrolment, renderLog, poseSvg, enrolFrame,
     setEnrolConsent: v => { $("enConsent").checked = v; renderSamples(); },
     setEnrolPin: async pin => { state.enrol.pin = { pin, hash: await sha256(pin) }; renderSamples(); },
     setManagerPin, managerPinOk,

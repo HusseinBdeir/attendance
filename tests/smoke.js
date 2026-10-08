@@ -116,6 +116,29 @@ async function waitFor(page, fn, arg, timeout) {
   check("save ok with consent", await page.evaluate(() => ATT_TEST.saveEnrolment()));
   const nFaces = await page.evaluate(async () => (await ATT_TEST.db.allFaces()).length);
   check("3 face rows stored", nFaces === 3, nFaces);
+
+  console.log("4b. test recognition readout + 5-sample cap + pose pictograms");
+  await page.evaluate(() => { ATT_TEST.setFrameSource(window.__crop(0, 0.6, false, 1.0)); });
+  await page.click("#enTest");
+  await sleep(1500);
+  const tOut = await page.textContent("#enTestOut");
+  check("test recognition shows Alice accepted", /\u2713 Alice A/.test(tOut), tOut);
+  await page.click("#enTest");
+  check("stop test clears the readout", (await page.textContent("#enTestOut")) === "");
+  // Bilal: five samples of face 1 walk through the five pictograms; a sixth is refused
+  await page.evaluate(() => ATT_TEST.selectEnrol("22222222-2222-2222-2222-222222222222"));
+  const poseTexts = [], guides = [], caps5 = [];
+  for (const [pad, mirror, scale] of [[0.6, false, 1.0], [0.8, true, 0.9], [0.5, false, 1.2], [0.7, true, 1.0], [0.6, false, 0.8]]) {
+    poseTexts.push(await page.textContent("#enPose"));
+    guides.push(await page.evaluate(() => document.getElementById("enGuide").dataset.pose));
+    caps5.push(await page.evaluate(async a => { ATT_TEST.setFrameSource(window.__crop(1, a[0], a[1], a[2])); return ATT_TEST.captureSample(); }, [pad, mirror, scale]));
+  }
+  check("5 samples captured for Bilal", caps5.every(Boolean), caps5);
+  check("pose line counts 1 / 5 … 5 / 5", poseTexts[0].includes("1 / 5") && poseTexts[4].includes("5 / 5"), poseTexts);
+  check("guide pictograms follow the pose order", guides.join(",") === "straight,left,right,up,smile", guides);
+  check("guide shows done after the 5th", await page.evaluate(() => document.getElementById("enGuide").dataset.pose) === "done");
+  check("6th capture refused + Capture disabled", (await page.evaluate(() => ATT_TEST.captureSample())) === false && await page.evaluate(() => document.getElementById("enCapture").disabled));
+  check("LEFT pictogram carries a pulsing arrow", /class="arrow"/.test(await page.evaluate(() => ATT_TEST.poseSvg("left"))));
   // a sample of Alice offered for Bilal must be rejected as "already matches"
   await page.evaluate(() => ATT_TEST.selectEnrol("22222222-2222-2222-2222-222222222222"));
   const dup = await page.evaluate(async () => { ATT_TEST.setFrameSource(window.__crop(0, 0.7, false, 1.0)); return ATT_TEST.captureSample(); });
