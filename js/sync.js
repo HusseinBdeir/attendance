@@ -13,18 +13,29 @@ const Sync = (() => {
   function onChange(fn) { listeners.push(fn); }
   function emit() { listeners.forEach(fn => { try { fn(last); } catch (e) { /* ignore */ } }); }
 
+  // The API endpoint is baked in per site by scripts/att03_endpoints.py
+  // (js/endpoints.js, gitignored): sites[SITE] if present, else default.
+  // Nobody types a URL or key on the device. The meta keys apiUrl/apiKey are a
+  // hidden override used only by the headless smoke test (ATT_TEST.db.setMeta).
+  function endpointFor(site) {
+    const E = (typeof ATT_ENDPOINTS === "object" && ATT_ENDPOINTS) || {};
+    const e = ((E.sites || {})[site]) || E.default || {};
+    return { url: e.url || "", key: e.key || "", perSite: !!((E.sites || {})[site]) };
+  }
   async function settings() {
+    const site = await DBX.getMeta("site", ATT_CONFIG.defaultSite);
+    const ep = endpointFor(site);
     return {
-      url: await DBX.getMeta("apiUrl", ""),
-      key: await DBX.getMeta("apiKey", ""),
-      site: await DBX.getMeta("site", ATT_CONFIG.defaultSite),
+      url: (await DBX.getMeta("apiUrl", "")) || ep.url,
+      key: (await DBX.getMeta("apiKey", "")) || ep.key,
+      site,
       device: await DBX.getMeta("device", ""),
     };
   }
 
   async function post(body) {
     const s = await settings();
-    if (!s.url) throw new Error("API URL not set");
+    if (!s.url) throw new Error(`no API endpoint for site ${s.site} — run scripts/att03_endpoints.py and redeploy`);
     const res = await fetch(s.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -115,5 +126,5 @@ const Sync = (() => {
   }
   function stop() { if (timer) clearInterval(timer); timer = null; }
 
-  return { run, roster, start, stop, onChange, get last() { return last; }, get running() { return running; } };
+  return { run, roster, start, stop, onChange, endpointFor, get last() { return last; }, get running() { return running; } };
 })();

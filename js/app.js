@@ -597,8 +597,6 @@
     sel.innerHTML = Object.entries(C.sites).map(([k, v]) => `<option value="${k}">${esc(v.name)}</option>`).join("");
     sel.value = state.site;
     $("setDevice").value = await DBX.getMeta("device", "");
-    $("setUrl").value = await DBX.getMeta("apiUrl", "");
-    $("setKey").value = await DBX.getMeta("apiKey", "");
     $("setThreshold").value = state.threshold;
     $("setLive").checked = state.liveness;
     const pending = await DBX.unsyncedCount();
@@ -608,20 +606,30 @@
       `roster ${state.staff.size} staff · ${state.faces.length} face samples on device · ${pending} punches pending`,
       `match threshold ${state.threshold} (default ${C.match.threshold}) · runner-up margin ${C.match.margin} · min face ${Math.round(C.match.minFaceFrac * 100)}% of frame · confirm ${C.match.confirmFrames} frames · liveness ${state.liveness ? "ON (blink)" : "off"}`,
       `online ${navigator.onLine} · last sync ${l.at ? l.at.toLocaleString() + " " + (l.ok === false ? "FAILED " : "") + l.msg : "never"}`,
+      (ep => ep.url ? `API endpoint for ${(C.sites[state.site] || {}).name || state.site}: built in${ep.perSite ? " (site-specific key)" : ""}` : `⚠ no API endpoint for site ${state.site} — run scripts/att03_endpoints.py and redeploy`)(Sync.endpointFor(state.site)),
       `service worker ${navigator.serviceWorker && navigator.serviceWorker.controller ? "active" : "none"} · screen wake lock ${state.wake ? "held" : "not held"}`,
       state.defaultPin ? "⚠ manager PIN is the factory default — change it now" : "manager PIN set",
     ].join("\n");
   }
   $("setSave").addEventListener("click", async () => {
+    const siteChanged = $("setSite").value !== state.site;
     await DBX.setMeta("site", $("setSite").value);
     await DBX.setMeta("device", $("setDevice").value.trim());
-    await DBX.setMeta("apiUrl", $("setUrl").value.trim());
-    await DBX.setMeta("apiKey", $("setKey").value.trim());
     const t = parseFloat($("setThreshold").value);
     await DBX.setMeta("threshold", (t > 0.2 && t < 0.8) ? String(t) : "");
     await DBX.setMeta("liveness", $("setLive").checked);
     await loadData(); renderSettings(); toast("Settings saved");
+    if (siteChanged) autoRoster(true);   // a new site = a new roster
   });
+  // Pull the roster without anyone pressing a button: on boot when it is empty
+  // or stale, and whenever the site changes. Skipped under automation
+  // (navigator.webdriver) so the headless smoke never touches the real API.
+  async function autoRoster(force) {
+    if (navigator.webdriver || !navigator.onLine || !Sync.endpointFor(state.site).url) return;
+    const at = Date.parse(await DBX.getMeta("rosterAt", "")) || 0;
+    const stale = Date.now() - at > C.sync.rosterMaxAgeHours * 3600 * 1000;
+    if (force || !state.staff.size || stale) await refreshRoster(false);
+  }
   $("setSync").addEventListener("click", async () => { const r = await Sync.run("manual"); toast(r.msg, r.ok === false); renderSettings(); });
   $("setRoster").addEventListener("click", () => refreshRoster(false));
   $("setRestore").addEventListener("click", () => refreshRoster(true));
@@ -672,6 +680,7 @@
     await migrate();
     await loadData();
     updateSyncDot();
+    autoRoster(false).catch(() => {});
     hint("Loading face models…");
     const camP = startCamera();
     let modelErr = null;
