@@ -4,7 +4,7 @@
 // Nothing secret lives here: the API URL + key are entered on the device.
 
 const ATT_CONFIG = {
-  version: "0.1.0",
+  version: "0.2.0",
 
   // Site code -> business-unit display name in Dataverse (exact, the API filters on it).
   sites: {
@@ -22,20 +22,47 @@ const ATT_CONFIG = {
   defaultSite: "LAUNA",
 
   // Manager PIN seeded on a fresh device — CHANGE IT in Settings on first login.
+  // Stored hashed (SHA-256) on the device; a plain value left by v0.1 is hashed on boot.
   firstRunManagerPin: "9999",
   pinLength: 4,
+  // Wrong PINs: after `pinLockAfter` failures in a row the keypad locks for `pinLockSec`.
+  pinLockAfter: 5,
+  pinLockSec: 30,
 
   // Face matching (face-api.js 128-d descriptors, euclidean distance).
-  // Lower threshold = stricter. 0.5 is a good tablet-at-the-door value with
-  // 3-5 enrolment samples; raise toward 0.6 only if genuine staff get rejected.
+  // A person is accepted when BOTH hold:
+  //   1. distance to their closest enrolment sample <= threshold
+  //   2. the closest sample of ANY OTHER person is at least `margin` further away
+  // Lower threshold = stricter. Typical values: same person 0.25-0.45, different
+  // people 0.55-0.80. Use Settings -> Calibration on the real tablet: it reports the
+  // closest pair of different people and the loosest same-person pair from the
+  // stored samples and recommends a threshold.
   match: {
+    detector: "ssd",      // "ssd" = SSD MobileNet v1 (accurate, ~5.6 MB) | "tiny" = Tiny Face Detector (fast, weaker)
     threshold: 0.5,
+    margin: 0.08,         // required gap between the best person and the runner-up
+    weakAbove: 0.45,      // a match above this distance is still accepted but flagged "weak" for review
     minSamples: 3,        // enrolment samples required before a face is usable
-    maxSamples: 5,
-    confirmFrames: 2,     // same person in N consecutive frames before punching
+    maxSamples: 6,        // 5 guided poses + one spare
+    confirmFrames: 3,     // same person in N consecutive frames before punching
     unknownFrames: 3,     // unknown face in N consecutive frames before the PIN hint
-    detectorInputSize: 320,
+    minFaceFrac: 0.14,    // face box width / frame width: smaller faces (people in the background) are ignored
+    detectorInputSize: 320,   // tiny detector only
     detectorScore: 0.5,
+    enrolScore: 0.7,      // detector confidence required for an enrolment sample
+    // Guided enrolment: the prompt shown for sample 1..n.
+    poses: ["Look straight at the camera", "Turn your head slightly LEFT", "Turn your head slightly RIGHT", "Tilt your chin up a little", "Natural smile", "One more, straight on"],
+  },
+
+  // Liveness (anti-photo) check: after a face is recognised the kiosk asks for a
+  // blink and only punches once it sees one. Off by default; switch it on in
+  // Settings once recognition itself is tuned. Blink = eye aspect ratio dips below
+  // `earClosed` and recovers above `earOpen` within `windowSec`.
+  liveness: {
+    enabled: false,
+    earClosed: 0.20,
+    earOpen: 0.26,
+    windowSec: 4,
   },
 
   punch: {

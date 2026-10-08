@@ -1,23 +1,28 @@
 // BHFIRMS Attendance kiosk — service worker: cache-first app shell + models,
 // so the tablet works fully offline. Bump CACHE AND the ?v= strings in
 // index.html on every deploy (they must match — see POS.md, same lesson).
-const CACHE = "bhfatt-v0.1.0";
+const CACHE = "bhfatt-v0.2.0";
 const SHELL = [
   "./",
   "./index.html",
-  "./css/att.css?v=0.1.0",
-  "./js/config.js?v=0.1.0",
-  "./js/db.js?v=0.1.0",
-  "./js/face.js?v=0.1.0",
-  "./js/sync.js?v=0.1.0",
-  "./js/app.js?v=0.1.0",
+  "./css/att.css?v=0.2.0",
+  "./js/config.js?v=0.2.0",
+  "./js/db.js?v=0.2.0",
+  "./js/face.js?v=0.2.0",
+  "./js/sync.js?v=0.2.0",
+  "./js/app.js?v=0.2.0",
   "./vendor/face-api.js",
   "./vendor/models/tiny_face_detector_model-weights_manifest.json",
   "./vendor/models/tiny_face_detector_model.bin",
+  "./vendor/models/ssd_mobilenetv1_model-weights_manifest.json",
+  "./vendor/models/ssd_mobilenetv1_model.bin",
+  "./vendor/models/face_landmark_68_model-weights_manifest.json",
+  "./vendor/models/face_landmark_68_model.bin",
   "./vendor/models/face_landmark_68_tiny_model-weights_manifest.json",
   "./vendor/models/face_landmark_68_tiny_model.bin",
   "./vendor/models/face_recognition_model-weights_manifest.json",
   "./vendor/models/face_recognition_model.bin",
+  "./brand/isabi-header.svg",
   "./manifest.webmanifest",
   "./icon.svg",
 ];

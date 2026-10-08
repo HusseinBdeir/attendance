@@ -135,7 +135,8 @@ async function waitFor(page, fn, arg, timeout) {
 
   console.log("6. debounce: same face again = no new punch");
   await page.evaluate(() => ATT_TEST.hideCard());
-  await sleep(2500);
+  // confirmFrames frames must pass again before the debounce card shows (slow under swiftshader)
+  await page.waitForFunction(() => document.getElementById("cardLine").textContent.includes("Already"), null, { timeout: 60000 });
   punches = await page.evaluate(d => ATT_TEST.db.punchesForDay(d), day);
   check("still one punch", punches.length === 1, punches.length);
   check("'already clocked' card", (await page.textContent("#cardLine")).includes("Already"));
@@ -232,6 +233,80 @@ async function waitFor(page, fn, arg, timeout) {
   await sleep(300);
   const rows = await page.$$eval("#logTable tbody tr", r => r.length);
   check("log shows today's punches", rows === 3, rows);
+
+  console.log("13. matching rules (synthetic descriptors)");
+  const rules = await page.evaluate(() => {
+    const v = (i, val) => { const d = new Array(128).fill(0); d[i] = val; return d; };
+    const faces = [{ staffId: "A", d: v(0, 0) }, { staffId: "A", d: v(1, 0.05) }, { staffId: "B", d: v(0, 0.6) }];
+    const near = ATT_TEST.face.match(v(0, 0.2), faces);     // A 0.20, B 0.40 -> gap 0.20
+    const amb = ATT_TEST.face.match(v(0, 0.28), faces);     // A 0.28, B 0.32 -> gap 0.04 < margin
+    const far = ATT_TEST.face.match(v(0, -0.7), faces);     // A 0.70
+    const names = new Map([["A", "Ann"], ["B", "Bob"]]);
+    return {
+      near: { m: near, d: ATT_TEST.face.decide(near, 0.5) },
+      amb: { m: amb, d: ATT_TEST.face.decide(amb, 0.5) },
+      far: ATT_TEST.face.decide(far, 0.5),
+      weak: ATT_TEST.face.decide({ distance: 0.47, runnerUp: null, margin: null }, 0.5),
+      none: ATT_TEST.face.decide(null, 0.5),
+      calOk: ATT_TEST.face.calibration(faces, names, 0.5),
+      calClose: ATT_TEST.face.calibration([faces[0], faces[1], { staffId: "B", d: v(0, 0.5) }], names, 0.5),
+      calReal: ATT_TEST.calibration(),
+    };
+  });
+  check("best = A with B as runner-up, accepted", rules.near.m.staffId === "A" && rules.near.m.runnerUp.staffId === "B" && rules.near.d.ok && !rules.near.d.weak, rules.near);
+  check("gap below margin -> ambiguous (no punch)", rules.amb.d.ok === false && rules.amb.d.reason === "ambiguous", rules.amb);
+  check("far -> rejected", rules.far.ok === false && rules.far.reason === "far", rules.far);
+  check("0.47 accepted but flagged weak", rules.weak.ok && rules.weak.weak === true, rules.weak);
+  check("no enrolments -> reason", rules.none.reason === "no-enrolments");
+  check("calibration: closest pair Ann/Bob at 0.6, recommend 0.5, no warning", rules.calOk.closestOther && rules.calOk.closestOther.distance === 0.6 && rules.calOk.recommend === 0.5 && rules.calOk.warnings.length === 0, rules.calOk);
+  check("calibration: pair at 0.5 -> warning + stricter recommendation", rules.calClose.warnings.length === 1 && /Ann/.test(rules.calClose.warnings[0]) && rules.calClose.recommend === 0.4, rules.calClose);
+  check("device calibration: 1 person, 3 samples, nothing to compare", rules.calReal.persons === 1 && rules.calReal.samples === 3 && rules.calReal.closestOther === null, rules.calReal);
+
+  console.log("14. face-size gate (background faces ignored)");
+  await page.evaluate(() => ATT_TEST.closeManager());
+  const small = await page.evaluate(() => ATT_TEST.detectFrame(window.__crop(0, 4.0, false, 0.6)));
+  console.log("     small face:", JSON.stringify(small));
+  check("face under minFaceFrac is ignored (no punch)", small.matched === false && (small.reason === "small" || small.reason === "no-face"), small);
+  const big = await page.evaluate(() => ATT_TEST.detectFrame(window.__crop(0, 0.7, false, 1.0)));
+  check("close face reports its frame fraction >= min", big.matched === true || big.reason !== "small", big);
+
+  console.log("15. liveness (blink) challenge");
+  await page.evaluate(async d => {
+    ATT_TEST.setFrameSource(null);
+    for (const p of await ATT_TEST.db.punchesForDay(d)) { if (p.staffName === "Alice A") { p.ts = new Date(Date.now() - 10 * 60000).toISOString(); await ATT_TEST.db.savePunch(p); } }
+    await ATT_TEST.setLiveness(true);
+    window.__ears = [0.3, 0.3, 0.3, 0.15, 0.15, 0.3];
+    ATT_TEST.setLiveMock(() => ({ ear: window.__ears.length > 1 ? window.__ears.shift() : window.__ears[0], box: { x: 0, y: 0, width: 10, height: 10 } }));
+    ATT_TEST.hideCard();
+    ATT_TEST.setFrameSource(window.__crop(0, 0.7, false, 1.0));
+  }, day);
+  await waitFor(page, async d => (await ATT_TEST.db.punchesForDay(d)).filter(p => p.staffName === "Alice A").length === 3, day, 30000);
+  punches = await page.evaluate(d => ATT_TEST.db.punchesForDay(d), day);
+  const live = punches.filter(p => p.staffName === "Alice A").sort((x, y) => x.ts.localeCompare(y.ts))[2];
+  check("punch only after the blink, note says so", live && live.method === "face" && /blink ok/.test(live.note), live && live.note);
+  // no blink within the window -> no punch
+  await page.evaluate(async d => {
+    for (const p of await ATT_TEST.db.punchesForDay(d)) { if (p.staffName === "Alice A") { p.ts = new Date(Date.now() - 10 * 60000).toISOString(); await ATT_TEST.db.savePunch(p); } }
+    window.__ears = [0.3];
+    ATT_TEST.hideCard();
+  }, day);
+  await page.waitForFunction(() => document.getElementById("hint").textContent.includes("Blink not seen"), null, { timeout: 15000 });
+  punches = await page.evaluate(d => ATT_TEST.db.punchesForDay(d), day);
+  check("no blink -> no punch, hint explains", punches.filter(p => p.staffName === "Alice A").length === 3);
+  await page.evaluate(async () => { await ATT_TEST.setLiveness(false); ATT_TEST.setLiveMock(null); ATT_TEST.setFrameSource(null); ATT_TEST.state.live = null; });
+
+  console.log("16. PIN lockout + hashed manager PIN");
+  await page.click("#btnMgr");
+  for (let i = 0; i < 5; i++) { for (const k of ["1", "1", "1", "1"]) await page.click(`#keypad button[data-k="${k}"]`); await sleep(550); }
+  check("5 wrong PINs lock the keypad", await page.evaluate(() => ATT_TEST.keypad.locked) === true);
+  check("lock message shown", /Too many attempts/.test(await page.textContent("#kpTitle")));
+  await page.evaluate(() => ATT_TEST.keypad.unlock());
+  await page.click('#keypad button[data-k="x"]');
+  const pinHash = await page.evaluate(async () => {
+    await ATT_TEST.setManagerPin("4321");
+    return { h: await ATT_TEST.db.getMeta("mgrPinHash", ""), old: await ATT_TEST.managerPinOk("9999"), neu: await ATT_TEST.managerPinOk("4321") };
+  });
+  check("manager PIN stored as sha256, old default rejected", pinHash.h.length === 64 && pinHash.old === false && pinHash.neu === true, pinHash);
 
   check("no page errors", errors.length === 0, errors);
   console.log(`\n${pass} passed, ${fail} failed`);

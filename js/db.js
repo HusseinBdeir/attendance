@@ -135,6 +135,7 @@ const DBX = {
   // meta (settings)
   getMeta(k, dflt) { return tx("meta", "readonly", s => s.get(k)).then(r => (r ? r.v : dflt)); },
   setMeta(k, v) { return tx("meta", "readwrite", s => s.put({ k, v })); },
+  delMeta(k) { return tx("meta", "readwrite", s => s.delete(k)); },
 
   wipe() {
     return openDB().then(db => new Promise((resolve, reject) => {

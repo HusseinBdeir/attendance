@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#0f172a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
-<link rel="stylesheet" href="css/att.css?v=0.1.0">
+<link rel="stylesheet" href="css/att.css?v=0.2.0">
 </head>
 <body class="loading">
 
@@ -34,6 +34,7 @@
       <div id="clock" class="clock">--:--</div>
     </div>
     <div class="barRight">
+      <img class="brand" src="brand/isabi-header.svg" alt="ISABI Systems">
       <div id="syncDot" class="syncDot" title="sync"></div>
       <button id="btnPin" class="btn big">Use PIN</button>
       <button id="btnMgr" class="btn icon" aria-label="Manager">&#9881;</button>
@@ -66,6 +67,7 @@
       <button data-tab="log" class="tab">Log</button>
       <button data-tab="settings" class="tab">Settings</button>
     </nav>
+    <img class="brand" src="brand/isabi-header.svg" alt="ISABI Systems">
   </header>
 
   <div id="tab-enrol" class="panel on">
@@ -74,15 +76,19 @@
         <label>Staff member</label>
         <input id="enSearch" type="search" placeholder="Search name…" autocomplete="off">
         <div id="enList" class="list"></div>
+        <p class="help">Enrol each person once, in the light they will clock in under. Five samples: straight, slightly left, slightly right, chin up, smile. Glasses on if they wear them at work. After saving, use <b>Test recognition</b> to see the live match and its gap to the next closest colleague.</p>
       </div>
       <div class="col">
         <div id="enWho" class="enWho">Pick a staff member on the left.</div>
         <div class="enCam"><video id="enVideo" autoplay muted playsinline></video></div>
+        <div id="enPose" class="pose"></div>
         <div id="enSamples" class="samples"></div>
         <div class="row">
           <button id="enCapture" class="btn primary" disabled>Capture sample</button>
           <button id="enClear" class="btn ghost" disabled>Clear samples</button>
+          <button id="enTest" class="btn">Test recognition</button>
         </div>
+        <div id="enTestOut" class="testOut"></div>
         <div class="row">
           <button id="enPin" class="btn" disabled>Set PIN</button>
           <span id="enPinState" class="muted"></span>
@@ -117,6 +123,10 @@
       <label>Device name <input id="setDevice" placeholder="e.g. La Una gate tablet"></label>
       <label>API URL <input id="setUrl" placeholder="https://…"></label>
       <label>API key <input id="setKey" type="password"></label>
+      <div class="grid2">
+        <label>Match threshold (0.40 strict … 0.60 loose) <input id="setThreshold" type="number" step="0.01" min="0.3" max="0.7"></label>
+        <label class="check tall"><input id="setLive" type="checkbox"> Liveness check: ask for a blink before each face punch (anti-photo)</label>
+      </div>
       <div class="row">
         <button id="setSave" class="btn primary">Save</button>
         <button id="setSync" class="btn">Sync now</button>
@@ -125,9 +135,11 @@
       </div>
       <div class="row">
         <button id="setMgrPin" class="btn">Change manager PIN</button>
+        <button id="setCalib" class="btn">Calibration report</button>
         <button id="setFull" class="btn">Full screen</button>
         <button id="setReset" class="btn danger">Reset device</button>
       </div>
+      <pre id="calibOut" class="info calib"></pre>
       <pre id="setInfo" class="info"></pre>
     </div>
   </div>
@@ -151,10 +163,10 @@
 <canvas id="snap" hidden></canvas>
 
 <script src="vendor/face-api.js"></script>
-<script src="js/config.js?v=0.1.0"></script>
-<script src="js/db.js?v=0.1.0"></script>
-<script src="js/face.js?v=0.1.0"></script>
-<script src="js/sync.js?v=0.1.0"></script>
-<script src="js/app.js?v=0.1.0"></script>
+<script src="js/config.js?v=0.2.0"></script>
+<script src="js/db.js?v=0.2.0"></script>
+<script src="js/face.js?v=0.2.0"></script>
+<script src="js/sync.js?v=0.2.0"></script>
+<script src="js/app.js?v=0.2.0"></script>
 </body>
 </html>
