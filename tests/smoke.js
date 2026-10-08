@@ -117,7 +117,7 @@ async function waitFor(page, fn, arg, timeout) {
   const nFaces = await page.evaluate(async () => (await ATT_TEST.db.allFaces()).length);
   check("3 face rows stored", nFaces === 3, nFaces);
 
-  console.log("4b. test recognition readout + 5-sample cap + pose pictograms");
+  console.log("4b. test recognition readout + 3-sample cap + pose pictograms + test before save");
   await page.evaluate(() => { ATT_TEST.setFrameSource(window.__crop(0, 0.6, false, 1.0)); });
   await page.click("#enTest");
   await sleep(1500);
@@ -125,20 +125,39 @@ async function waitFor(page, fn, arg, timeout) {
   check("test recognition shows Alice accepted", /\u2713 Alice A/.test(tOut), tOut);
   await page.click("#enTest");
   check("stop test clears the readout", (await page.textContent("#enTestOut")) === "");
-  // Bilal: five samples of face 1 walk through the five pictograms; a sixth is refused
+  // Bilal: three samples of face 1 walk through the three pictograms; a fourth is refused
   await page.evaluate(() => ATT_TEST.selectEnrol("22222222-2222-2222-2222-222222222222"));
-  const poseTexts = [], guides = [], caps5 = [];
-  for (const [pad, mirror, scale] of [[0.6, false, 1.0], [0.8, true, 0.9], [0.5, false, 1.2], [0.7, true, 1.0], [0.6, false, 0.8]]) {
+  // test with 0 pending samples and Bilal in front: not recognised (only Alice is stored)
+  await page.evaluate(() => { ATT_TEST.setFrameSource(window.__crop(1, 0.6, false, 1.0)); });
+  await page.click("#enTest"); await sleep(1500);
+  check("before capture: Bilal not recognised", /Not recognised/.test(await page.textContent("#enTestOut")), await page.textContent("#enTestOut"));
+  await page.click("#enTest");
+  const poseTexts = [], guides = [], caps3 = [];
+  for (const [pad, mirror, scale] of [[0.6, false, 1.0], [0.8, true, 0.9], [0.5, false, 1.2]]) {
     poseTexts.push(await page.textContent("#enPose"));
     guides.push(await page.evaluate(() => document.getElementById("enGuide").dataset.pose));
-    caps5.push(await page.evaluate(async a => { ATT_TEST.setFrameSource(window.__crop(1, a[0], a[1], a[2])); return ATT_TEST.captureSample(); }, [pad, mirror, scale]));
+    caps3.push(await page.evaluate(async a => { ATT_TEST.setFrameSource(window.__crop(1, a[0], a[1], a[2])); return ATT_TEST.captureSample(); }, [pad, mirror, scale]));
+    if (caps3.length === 2) {
+      // two of three taken: the test says how many are missing instead of "no enrolments"
+      await page.click("#enTest"); await sleep(1500);
+      check("2 of 3 taken: readout says only 2 of 3", /[Oo]nly 2 of 3/.test(await page.textContent("#enTestOut")), await page.textContent("#enTestOut"));
+      await page.click("#enTest");
+    }
   }
-  check("5 samples captured for Bilal", caps5.every(Boolean), caps5);
-  check("pose line counts 1 / 5 … 5 / 5", poseTexts[0].includes("1 / 5") && poseTexts[4].includes("5 / 5"), poseTexts);
-  check("guide pictograms follow the pose order", guides.join(",") === "straight,left,right,up,smile", guides);
-  check("guide shows done after the 5th", await page.evaluate(() => document.getElementById("enGuide").dataset.pose) === "done");
-  check("6th capture refused + Capture disabled", (await page.evaluate(() => ATT_TEST.captureSample())) === false && await page.evaluate(() => document.getElementById("enCapture").disabled));
+  check("3 samples captured for Bilal", caps3.every(Boolean), caps3);
+  check("pose line counts 1 / 3 … 3 / 3", poseTexts[0].includes("1 / 3") && poseTexts[2].includes("3 / 3"), poseTexts);
+  check("guide pictograms follow the pose order", guides.join(",") === "straight,left,right", guides);
+  check("guide shows done after the 3rd", await page.evaluate(() => document.getElementById("enGuide").dataset.pose) === "done");
+  check("4th capture refused + Capture disabled", (await page.evaluate(() => ATT_TEST.captureSample())) === false && await page.evaluate(() => document.getElementById("enCapture").disabled));
+  check("Save enabled + glowing with 3 unsaved samples", await page.evaluate(() => !document.getElementById("enSave").disabled && document.getElementById("enSave").classList.contains("ready")));
   check("LEFT pictogram carries a pulsing arrow", /class="arrow"/.test(await page.evaluate(() => ATT_TEST.poseSvg("left"))));
+  // test BEFORE saving: the unsaved captures count, the readout says so
+  await page.evaluate(() => { ATT_TEST.setFrameSource(window.__crop(1, 0.7, true, 1.0)); });
+  await page.click("#enTest"); await sleep(1500);
+  const tPend = await page.textContent("#enTestOut");
+  check("test before save recognises Bilal from the unsaved samples", /\u2713 Bilal B/.test(tPend) && /not saved yet/.test(tPend), tPend);
+  await page.click("#enTest");
+  check("nothing stored for Bilal yet", (await page.evaluate(async () => (await ATT_TEST.db.allFaces()).filter(f => f.staffId.startsWith("2222")).length)) === 0);
   // a sample of Alice offered for Bilal must be rejected as "already matches"
   await page.evaluate(() => ATT_TEST.selectEnrol("22222222-2222-2222-2222-222222222222"));
   const dup = await page.evaluate(async () => { ATT_TEST.setFrameSource(window.__crop(0, 0.7, false, 1.0)); return ATT_TEST.captureSample(); });

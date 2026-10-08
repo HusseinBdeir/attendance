@@ -460,11 +460,12 @@
       Array.from({ length: Math.max(0, target - s.length) }, () => `<span class="empty"></span>`).join("");
     const ready = state.enrol.staffId && (s.length >= C.match.minSamples || (state.enrol.pin && s.length === 0));
     $("enSave").disabled = !ready;
+    $("enSave").classList.toggle("ready", !!ready && s.length > 0);
     $("enCapture").disabled = !state.enrol.staffId || s.length >= C.match.maxSamples;
     const pose = $("enPose"), guide = $("enGuide");
     if (!state.enrol.staffId) { pose.textContent = ""; guide.hidden = true; guide.className = "guide"; }
     else if (s.length >= C.match.maxSamples) {
-      pose.innerHTML = `<span class="ico">${poseSvg("done")}</span><span>All ${s.length} samples taken — save the enrolment.</span>`;
+      pose.innerHTML = `<span class="ico">${poseSvg("done")}</span><span>All ${s.length} samples taken — tick the consent box, then press <b>Save enrolment</b>.</span>`;
       guide.innerHTML = poseSvg("done"); guide.className = "guide done"; guide.hidden = false;
     } else {
       const i = Math.min(s.length, C.match.poses.length - 1);
@@ -544,7 +545,7 @@
     if (sep) {
       const who = state.staff.get(sep.staffId);
       const close = sep.distance < state.threshold + C.match.margin;
-      toast(`Saved ${e.samples.length} sample(s) for ${st.name} · closest other person: ${who ? who.name : "?"} at ${r3(sep.distance)}${close ? " — TOO CLOSE, re-enrol both with all 5 samples in good light" : " (good)"}`, close, close ? 7000 : 4000);
+      toast(`Saved ${e.samples.length} sample(s) for ${st.name} · closest other person: ${who ? who.name : "?"} at ${r3(sep.distance)}${close ? ` — TOO CLOSE, re-enrol both with all ${C.match.maxSamples} samples in good light` : " (good)"}`, close, close ? 7000 : 4000);
     } else toast(`Saved ${e.samples.length} sample(s) for ${st.name}`);
     state.enrol = { staffId: null, samples: [], pin: null };
     $("enWho").textContent = "Pick a staff member on the left.";
@@ -570,14 +571,22 @@
         if (!det) big("wait", "No face in view");
         else if (det.frac < C.match.minFaceFrac) big("wait", "Come closer", `face is ${Math.round(det.frac * 100)}% of the frame, minimum ${Math.round(C.match.minFaceFrac * 100)}%`);
         else {
-          const faces = usableFaces();
+          // Unsaved captures of the person being enrolled count too (they replace that
+          // person's stored samples on Save), so the manager can test before saving.
+          const pend = state.enrol.staffId ? state.enrol.samples : [];
+          const pendOk = pend.length >= C.match.minSamples;
+          let faces = usableFaces();
+          if (pendOk) faces = faces.filter(f => f.staffId !== state.enrol.staffId).concat(pend.map(s => ({ staffId: state.enrol.staffId, d: s.d, pending: true })));
           const m = faces.length ? Face.match(det.descriptor, faces) : null;
           const v = Face.decide(m, state.threshold);
           const nm = id => esc((state.staff.get(id) || {}).name || "?");
           const reasons = { far: "no enrolled face is close enough", ambiguous: "two people are too close to tell apart", "no-enrolments": "no usable enrolments on this device" };
-          if (!m) big("bad", "✗ No usable enrolments on this device", "save at least " + C.match.minSamples + " samples for someone first");
+          const unsaved = m && pendOk && m.staffId === state.enrol.staffId ? `<span class="pend">not saved yet — press Save enrolment</span> · ` : "";
+          const short = pend.length && !pendOk ? `<span class="pend">only ${pend.length} of ${C.match.minSamples} samples taken for ${nm(state.enrol.staffId)} — capture the rest, then press Save enrolment</span>` : "";
+          if (!m && short) big("bad", `✗ Only ${pend.length} of ${C.match.minSamples} samples taken`, short);
+          else if (!m) big("bad", "✗ No usable enrolments on this device", "save at least " + C.match.minSamples + " samples for someone first");
           else big(v.ok ? "ok" : "bad", v.ok ? `✓ ${nm(m.staffId)}${v.weak ? " (weak)" : ""}` : `✗ Not recognised`,
-            `${v.ok ? "" : (reasons[v.reason] || v.reason) + " · "}closest: ${nm(m.staffId)} at ${r3(m.distance)}` +
+            unsaved + (short ? short + " · " : "") + `${v.ok ? "" : (reasons[v.reason] || v.reason) + " · "}closest: ${nm(m.staffId)} at ${r3(m.distance)}` +
             (m.runnerUp ? ` · next: ${nm(m.runnerUp.staffId)} at ${r3(m.runnerUp.distance)} (gap ${r3(m.margin)})` : " · no other enrolled person") +
             ` · threshold ${state.threshold} · margin ${C.match.margin}`);
         }

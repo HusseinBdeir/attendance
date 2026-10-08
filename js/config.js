@@ -5,7 +5,7 @@
 // (generated per site by scripts/att03_endpoints.py, gitignored).
 
 const ATT_CONFIG = {
-  version: "0.2.2",
+  version: "0.2.3",
 
   // Site code -> business-unit display name in Dataverse (exact, the API filters on it).
   sites: {
@@ -44,7 +44,7 @@ const ATT_CONFIG = {
     margin: 0.08,         // required gap between the best person and the runner-up
     weakAbove: 0.45,      // a match above this distance is still accepted but flagged "weak" for review
     minSamples: 3,        // enrolment samples required before a face is usable
-    maxSamples: 5,        // exactly the 5 guided poses (the button disables after the 5th)
+    maxSamples: 3,        // exactly the 3 guided poses (the button disables after the 3rd)
     confirmFrames: 3,     // same person in N consecutive frames before punching
     unknownFrames: 3,     // unknown face in N consecutive frames before the PIN hint
     minFaceFrac: 0.14,    // face box width / frame width: smaller faces (people in the background) are ignored
@@ -52,11 +52,16 @@ const ATT_CONFIG = {
     detectorScore: 0.5,
     enrolScore: 0.7,      // detector confidence required for an enrolment sample
     // Guided enrolment: the prompt shown for sample 1..n.
-    poses: ["Look straight at the camera", "Turn your head slightly LEFT", "Turn your head slightly RIGHT", "Tilt your chin up a little", "Natural smile"],
+    // v0.2.3: three poses. The matcher keeps every capture as its own key and accepts the
+    // nearest one, so a pose only earns its place if the door camera will see it: straight
+    // (every punch) + a small turn each way (people glance at the screen while walking up).
+    // Chin-up and smile were dropped (an eye-level kiosk never sees a raised chin; expression
+    // shifts the key less than light, glasses or a scarf do - re-enrol for those instead).
+    poses: ["Look straight at the camera", "Turn your head slightly LEFT", "Turn your head slightly RIGHT"],
     // Pictogram per pose (keys of POSE_SVG in app.js) — shown big over the preview so
     // the person can follow it without reading. Arrows point the way the head turns
     // AS SEEN IN THE MIRRORED PREVIEW.
-    poseIcons: ["straight", "left", "right", "up", "smile"],
+    poseIcons: ["straight", "left", "right"],
   },
 
   // Liveness (anti-photo) check: after a face is recognised the kiosk asks for a

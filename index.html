@@ -76,25 +76,25 @@
         <label>Staff member</label>
         <input id="enSearch" type="search" placeholder="Search name…" autocomplete="off">
         <div id="enList" class="list"></div>
-        <p class="help">Enrol each person once, in the light they will clock in under. Five samples: straight, slightly left, slightly right, chin up, smile. Glasses on if they wear them at work. After saving, use <b>Test recognition</b> to see the live match and its gap to the next closest colleague.</p>
+        <p class="help">Enrol each person once, in the light they will clock in under. Three samples: straight, slightly left, slightly right. Glasses or a scarf on if they wear them at work (re-enrol if that changes). Tick the consent box and press <b>Save enrolment</b>, then use <b>Test recognition</b> to see the live match and its gap to the next closest colleague.</p>
       </div>
       <div class="col">
         <div id="enWho" class="enWho">Pick a staff member on the left.</div>
         <div class="enCam"><video id="enVideo" autoplay muted playsinline></video><div id="enGuide" class="guide" hidden></div></div>
         <div id="enPose" class="pose"></div>
         <div id="enSamples" class="samples"></div>
+        <label class="check"><input id="enConsent" type="checkbox" disabled> Employee agrees to the storage of a face template for attendance.</label>
         <div class="row">
           <button id="enCapture" class="btn primary" disabled>Capture sample</button>
+          <button id="enSave" class="btn primary" disabled>Save enrolment</button>
           <button id="enClear" class="btn ghost" disabled>Clear samples</button>
-          <button id="enTest" class="btn">Test recognition</button>
         </div>
-        <div id="enTestOut" class="testOut"></div>
         <div class="row">
+          <button id="enTest" class="btn">Test recognition</button>
           <button id="enPin" class="btn" disabled>Set PIN</button>
           <span id="enPinState" class="muted"></span>
         </div>
-        <label class="check"><input id="enConsent" type="checkbox" disabled> Employee agrees to the storage of a face template for attendance.</label>
-        <button id="enSave" class="btn primary wide" disabled>Save enrolment</button>
+        <div id="enTestOut" class="testOut"></div>
       </div>
     </div>
   </div>
