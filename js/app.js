@@ -392,26 +392,36 @@
 
 
   // ---------- pose pictograms (enrolment guide; mirrored-preview sense) ----------
-  // A head outline with the features shifted the way the face turns, plus a pulsing
-  // arrow on the side to turn to. Plain shapes, no text: usable without reading.
+  // Every pictogram shows the camera at the top and a head beneath it, so the turn is
+  // read RELATIVE TO THE CAMERA. Straight: both ears, a dashed sight line from the lens
+  // to the nose. Slightly left / right: the features slide a little off centre, the
+  // far ear disappears, the near ear shows, and a SHORT curved arrow over the crown
+  // pulses the way the head turns (as seen in the mirrored preview). v0.2.4: the old
+  // big side arrow + wide feature shift read as "turn all the way" — a full profile
+  // hides one eye and the detector finds no face, so the turn must stay small enough
+  // to keep both eyes in view. Plain shapes, no text: usable without reading.
   function poseSvg(kind) {
-    const head = (dx, dy, mouth) => `<circle cx="50" cy="52" r="26" fill="none" stroke="#f8fafc" stroke-width="4"/>` +
-      `<circle cx="${41 + dx}" cy="${46 + dy}" r="3.2" fill="#f8fafc"/><circle cx="${59 + dx}" cy="${46 + dy}" r="3.2" fill="#f8fafc"/>` +
-      `<path d="M${50 + dx * 1.5} ${47 + dy} v9 h${dx >= 0 ? 5 : -5}" fill="none" stroke="#f8fafc" stroke-width="3" stroke-linecap="round"/>` +
-      (mouth || `<path d="M${42 + dx} ${64 + dy} h16" fill="none" stroke="#f8fafc" stroke-width="3.5" stroke-linecap="round"/>`);
-    const arrow = (d, dx, dy) => `<g class="arrow" style="--dx:${dx}px;--dy:${dy}px"><path d="${d}" fill="none" stroke="#c9a227" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></g>`;
-    const cam = `<rect x="39" y="4" width="22" height="14" rx="3" fill="#c9a227"/><circle cx="50" cy="11" r="4" fill="#0f172a"/>`;
+    const W = "#f8fafc", B = "#c9a227";
+    const cam = `<rect x="40" y="2" width="20" height="12" rx="3" fill="${B}"/><circle cx="50" cy="8" r="3.4" fill="#0f172a"/>`;
+    const sight = `<path d="M50 16 V40" fill="none" stroke="${B}" stroke-width="2" stroke-dasharray="3 4" stroke-linecap="round"/>`;
+    const earL = `<path d="M24.5 57 q-8 7 0 14" fill="none" stroke="${W}" stroke-width="3.5" stroke-linecap="round"/>`;
+    const earR = `<path d="M75.5 57 q8 7 0 14" fill="none" stroke="${W}" stroke-width="3.5" stroke-linecap="round"/>`;
+    // dx = how far the features slide (a small number = a small turn); the eye on the
+    // far side is drawn a touch smaller, as it is when a face turns a little
+    const head = (dx) => `<circle cx="50" cy="64" r="26" fill="none" stroke="${W}" stroke-width="4"/>` +
+      `<circle cx="${41 + dx}" cy="58" r="${dx < 0 ? 2.7 : 3.3}" fill="${W}"/><circle cx="${59 + dx}" cy="58" r="${dx > 0 ? 2.7 : 3.3}" fill="${W}"/>` +
+      `<path d="M${50 + dx * 1.5} 59 v9 h${dx >= 0 ? 5 : -5}" fill="none" stroke="${W}" stroke-width="3" stroke-linecap="round"/>` +
+      `<path d="M${42 + dx} 76 h16" fill="none" stroke="${W}" stroke-width="3.5" stroke-linecap="round"/>`;
+    // a short arc over the crown with a chevron at the end = "turn a little this way"
+    const arrow = (d, dx) => `<g class="arrow" style="--dx:${dx}px;--dy:0px"><path d="${d}" fill="none" stroke="${B}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></g>`;
     let body;
     switch (kind) {
-      case "left":  body = head(-8, 0) + arrow("M38 88 H10 M22 76 L10 88 L22 100", -7, 0); break;
-      case "right": body = head(8, 0) + arrow("M62 88 H90 M78 76 L90 88 L78 100", 7, 0); break;
-      case "up":    body = head(0, -7) + arrow("M50 24 V4 M38 16 L50 4 L62 16", 0, -6); break;
-      case "smile": body = head(0, 0, `<path d="M38 60 Q50 74 62 60" fill="none" stroke="#f8fafc" stroke-width="3.5" stroke-linecap="round"/>`) +
-                           `<path d="M14 36 l4 -4 M10 48 l5 0 M86 36 l-4 -4 M90 48 l-5 0" stroke="#c9a227" stroke-width="3" stroke-linecap="round"/>`; break;
-      case "done":  body = `<circle cx="50" cy="52" r="34" fill="none" stroke="#22c55e" stroke-width="5"/><path d="M32 54 l12 12 l26 -28" fill="none" stroke="#22c55e" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>`; break;
-      default:      body = cam + head(0, 0) + `<circle cx="50" cy="52" r="34" fill="none" stroke="#c9a227" stroke-width="2.5" stroke-dasharray="6 6"/>`;
+      case "left":  body = cam + head(-6) + earR + arrow("M60 32 Q50 20 38 29 M46 28 L38 29 L41 22", -4); break;
+      case "right": body = cam + head(6) + earL + arrow("M40 32 Q50 20 62 29 M54 28 L62 29 L59 22", 4); break;
+      case "done":  body = `<circle cx="50" cy="56" r="34" fill="none" stroke="#22c55e" stroke-width="5"/><path d="M32 58 l12 12 l26 -28" fill="none" stroke="#22c55e" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>`; break;
+      default:      body = cam + sight + head(0) + earL + earR;
     }
-    return `<svg viewBox="0 0 100 104" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${body}</svg>`;
+    return `<svg viewBox="0 0 100 92" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${body}</svg>`;
   }
   function poseIcon(i) { return (C.match.poseIcons || [])[i] || "straight"; }
 
@@ -479,9 +489,11 @@
     src = src || enrolFrame();
     if (!src) { toast("Camera not ready — wait a second and try again", true); return false; }
     const det = await Face.detectOne(src);
-    if (!det) { toast("No face found — look straight at the camera", true); return false; }
+    // a turned pose that finds no face is almost always a FULL turn (profile hides an eye)
+    const turning = ["left", "right"].includes(poseIcon(Math.min(state.enrol.samples.length, C.match.poses.length - 1)));
+    if (!det) { toast(turning ? "No face found — turn only a little, both eyes must stay in view" : "No face found — look straight at the camera", true); return false; }
     if (det.frac < C.match.minFaceFrac) { toast("Too far — come closer to the camera", true); return false; }
-    if (det.score < C.match.enrolScore) { toast("Face not clear enough — more light, look straight", true); return false; }
+    if (det.score < C.match.enrolScore) { toast(turning ? "Face not clear enough — turn less, more light" : "Face not clear enough — more light, look straight", true); return false; }
     // reject a sample that already matches someone ELSE's enrolment
     const other = usableFaces().filter(f => f.staffId !== state.enrol.staffId);
     const m = other.length ? Face.match(det.descriptor, other) : null;

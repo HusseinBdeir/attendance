@@ -5,7 +5,7 @@
 // (generated per site by scripts/att03_endpoints.py, gitignored).
 
 const ATT_CONFIG = {
-  version: "0.2.3",
+  version: "0.2.4",
 
   // Site code -> business-unit display name in Dataverse (exact, the API filters on it).
   sites: {
@@ -57,10 +57,13 @@ const ATT_CONFIG = {
     // (every punch) + a small turn each way (people glance at the screen while walking up).
     // Chin-up and smile were dropped (an eye-level kiosk never sees a raised chin; expression
     // shifts the key less than light, glasses or a scarf do - re-enrol for those instead).
-    poses: ["Look straight at the camera", "Turn your head slightly LEFT", "Turn your head slightly RIGHT"],
-    // Pictogram per pose (keys of POSE_SVG in app.js) — shown big over the preview so
-    // the person can follow it without reading. Arrows point the way the head turns
-    // AS SEEN IN THE MIRRORED PREVIEW.
+    // v0.2.4: a FULL turn (profile) hides one eye and the detector finds no face, so the
+    // two turn prompts say "a little" and "keep both eyes on the camera".
+    poses: ["Look straight at the camera", "Turn your head slightly LEFT — just a little, keep both eyes on the camera", "Turn your head slightly RIGHT — just a little, keep both eyes on the camera"],
+    // Pictogram per pose (keys of poseSvg in app.js) — shown big over the preview so
+    // the person can follow it without reading. A short arc over the crown points the
+    // way the head turns AS SEEN IN THE MIRRORED PREVIEW; the near ear shows, the far
+    // one hides, both eyes stay visible = a small turn.
     poseIcons: ["straight", "left", "right"],
   },
 

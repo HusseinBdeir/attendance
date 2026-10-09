@@ -151,6 +151,14 @@ async function waitFor(page, fn, arg, timeout) {
   check("4th capture refused + Capture disabled", (await page.evaluate(() => ATT_TEST.captureSample())) === false && await page.evaluate(() => document.getElementById("enCapture").disabled));
   check("Save enabled + glowing with 3 unsaved samples", await page.evaluate(() => !document.getElementById("enSave").disabled && document.getElementById("enSave").classList.contains("ready")));
   check("LEFT pictogram carries a pulsing arrow", /class="arrow"/.test(await page.evaluate(() => ATT_TEST.poseSvg("left"))));
+  // v0.2.4: every pose shows the camera; the turns are SMALL (both eyes drawn, one ear) + a short arc arrow
+  const svgs = await page.evaluate(() => ({ s: ATT_TEST.poseSvg("straight"), l: ATT_TEST.poseSvg("left"), r: ATT_TEST.poseSvg("right") }));
+  const eyes = s => (s.match(/<circle cx="[\d.]+" cy="58"/g) || []).length, ears = s => (s.match(/q-?8 7 0 14/g) || []).length;
+  check("all three pictograms show the camera", [svgs.s, svgs.l, svgs.r].every(s => /<rect x="40" y="2"/.test(s)));
+  check("straight: no arrow, both ears, sight line", !/class="arrow"/.test(svgs.s) && ears(svgs.s) === 2 && /stroke-dasharray/.test(svgs.s));
+  check("left/right: both eyes still drawn + one ear each", eyes(svgs.l) === 2 && eyes(svgs.r) === 2 && ears(svgs.l) === 1 && ears(svgs.r) === 1);
+  check("right pictogram arrow nudges the other way", /--dx:-4px/.test(svgs.l) && /--dx:4px/.test(svgs.r));
+  check("turn prompts say slightly + both eyes", (await page.evaluate(() => ATT_CONFIG.match.poses.slice(1))).every(p => /slightly/.test(p) && /both eyes/.test(p)));
   // test BEFORE saving: the unsaved captures count, the readout says so
   await page.evaluate(() => { ATT_TEST.setFrameSource(window.__crop(1, 0.7, true, 1.0)); });
   await page.click("#enTest"); await sleep(1500);
