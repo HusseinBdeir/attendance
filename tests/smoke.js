@@ -358,6 +358,30 @@ async function waitFor(page, fn, arg, timeout) {
   });
   check("manager PIN stored as sha256, old default rejected", pinHash.h.length === 64 && pinHash.old === false && pinHash.neu === true, pinHash);
 
+  console.log("17. v0.3.0 HUD, KPIs, shift pairing & filters");
+  check("kiosk on-site pill shows 1 on-site (Bilal IN, Alice IN after OUT+IN+IN)", /on-site/.test(await page.textContent("#onSiteCount")));
+  await page.evaluate(() => ATT_TEST.openManager());
+  check("default PIN warning banner hidden after PIN changed", await page.evaluate(() => document.getElementById("mgrPinBanner").hidden === true));
+  await page.click('.tab[data-tab="staff"]');
+  await sleep(200);
+  check("staff KPIs: 3 active, 1 face ready, 1 PIN configured, 1 needs setup",
+    (await page.textContent("#kpiStTotal")) === "3" &&
+    (await page.textContent("#kpiStFace")) === "1" &&
+    (await page.textContent("#kpiStPin")) === "1" &&
+    (await page.textContent("#kpiStMissing")) === "1");
+  await page.click('#stFilter button[data-sf="none"]');
+  check("staff filter 'Not Enrolled' shows only Carla", (await page.$$eval("#stTable tbody tr", r => r.length)) === 1);
+  await page.click('#stFilter button[data-sf="all"]');
+  await page.click('.tab[data-tab="log"]');
+  await sleep(200);
+  check("log KPIs show 2 staff seen and 4 events",
+    (await page.textContent("#kpiLogStaff")) === "2" &&
+    (await page.textContent("#kpiLogEvents")) === "4");
+  await page.click("#logShiftsToggle");
+  check("shift pairing panel opens and shows 2 shift cards",
+    await page.evaluate(() => !document.getElementById("logShiftsPanel").hidden) &&
+    (await page.$$eval("#logShiftsBody .shiftCard", r => r.length)) === 2);
+
   check("no page errors", errors.length === 0, errors);
   console.log(`\n${pass} passed, ${fail} failed`);
   await browser.close();

@@ -154,7 +154,7 @@ const Face = (() => {
     if (closestOther) {
       const ceiling = closestOther.distance - M().margin - 0.02;
       recommend = Math.max(0.40, Math.min(0.55, Math.floor(ceiling * 100) / 100));
-      if (closestOther.distance < t + M().margin) warnings.push(`${nm(closestOther.a)} and ${nm(closestOther.b)} are only ${r3(closestOther.distance)} apart — the kiosk will treat them as ambiguous and ask for a PIN; re-enrol both with 5 clear samples.`);
+      if (closestOther.distance < t + M().margin) warnings.push(`${nm(closestOther.a)} and ${nm(closestOther.b)} are only ${r3(closestOther.distance)} apart — the kiosk will treat them as ambiguous and ask for a PIN; re-enrol both with ${M().maxSamples} clear samples.`);
     }
     perPerson.forEach(p => { if (p.spread > t) warnings.push(`${p.name}: own samples spread ${r3(p.spread)} — one sample is probably a bad capture; re-enrol.`); });
     return {

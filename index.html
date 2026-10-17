@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<title>Attendance</title>
-<meta name="theme-color" content="#0f172a">
+<title>BHFIRMS Attendance</title>
+<meta name="theme-color" content="#070b14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
-<link rel="stylesheet" href="css/att.css?v=0.2.4">
+<link rel="stylesheet" href="css/att.css?v=0.3.0">
 </head>
 <body class="loading">
 
@@ -16,42 +16,111 @@
   <div class="cam">
     <video id="video" autoplay muted playsinline></video>
     <canvas id="overlay"></canvas>
-    <div id="hint" class="hint">Starting camera…</div>
-  </div>
+    <div class="camVignette"></div>
 
-  <div id="card" class="card hidden">
-    <img id="cardImg" alt="">
-    <div class="cardBody">
-      <div id="cardName" class="cardName"></div>
-      <div id="cardLine" class="cardLine"></div>
-      <button id="cardFlip" class="btn ghost small">Wrong direction?</button>
+    <!-- Top floating HUD -->
+    <div class="kioskTop">
+      <div class="kioskTopLeft">
+        <div class="sitePill">
+          <span class="sitePulse"></span>
+          <div id="siteName" class="siteName">—</div>
+          <span id="kioskDevice" class="deviceTag"></span>
+        </div>
+        <div id="kioskOnSite" class="onSitePill" title="Currently clocked in today">
+          <span class="onSiteDot"></span>
+          <span id="onSiteCount">0 on-site</span>
+        </div>
+      </div>
+
+      <div class="kioskTopCenter">
+        <img class="brand topBrand" src="brand/isabi-header.svg" alt="ISABI Systems">
+      </div>
+
+      <div class="kioskTopRight">
+        <button id="syncPill" class="syncPill" type="button" title="Tap to sync now">
+          <div id="syncDot" class="syncDot" title="sync"></div>
+          <span id="syncLabel" class="syncLabel">Synced</span>
+        </button>
+        <button id="btnSound" class="hudIconBtn" type="button" title="Toggle sound effects" aria-label="Toggle sound">
+          <svg id="icoSoundOn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+          <svg id="icoSoundOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+        </button>
+        <div class="clockBox">
+          <div class="clockRow">
+            <div id="clock" class="clock">--:--</div>
+            <span id="clockSec" class="clockSec">:00</span>
+          </div>
+          <div id="clockDate" class="clockDate">---</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom floating guidance pill -->
+    <div class="hintWrap">
+      <div id="hint" class="hint">Starting camera…</div>
+      <div id="streakBar" class="streakBar"><div id="streakFill" class="streakFill"></div></div>
     </div>
   </div>
 
+  <!-- Confirmation Card -->
+  <div id="card" class="card hidden">
+    <div class="cardAvatarWrap">
+      <img id="cardImg" alt="">
+      <div id="cardAvatarBadge" class="cardAvatarBadge">&#10003;</div>
+    </div>
+    <div class="cardBody">
+      <div class="cardTopRow">
+        <span id="cardBadge" class="cardBadge">CLOCKED IN</span>
+        <span id="cardMeta" class="cardMeta"></span>
+      </div>
+      <div id="cardName" class="cardName"></div>
+      <div id="cardSub" class="cardSub"></div>
+      <div id="cardLine" class="cardLine"></div>
+      <div class="cardActions">
+        <button id="cardFlip" class="btn ghost small">Wrong direction?</button>
+        <button id="cardDismiss" class="btn ghost small">Done</button>
+      </div>
+    </div>
+    <div class="cardProgress"><div id="cardBar" class="cardBar"></div></div>
+  </div>
+
+  <!-- Bottom Control Dock -->
   <div class="bar">
     <div class="barLeft">
-      <div id="siteName" class="siteName">—</div>
-      <div id="clock" class="clock">--:--</div>
+      <div class="biometricBadge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="10" r="3"/><path d="M7 18a5 5 0 0 1 10 0"/></svg>
+        <span id="kioskStats">Face ID &amp; PIN Ready</span>
+      </div>
     </div>
     <div class="barRight">
-      <img class="brand" src="brand/isabi-header.svg" alt="ISABI Systems">
-      <div id="syncDot" class="syncDot" title="sync"></div>
-      <button id="btnPin" class="btn big">Use PIN</button>
-      <button id="btnMgr" class="btn icon" aria-label="Manager">&#9881;</button>
+      <img class="brand dockBrand" src="brand/isabi-header.svg" alt="ISABI Systems">
+      <button id="btnPin" class="btn big pinCta">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2"/><circle cx="8" cy="6" r="1"/><circle cx="12" cy="6" r="1"/><circle cx="16" cy="6" r="1"/><circle cx="8" cy="10" r="1"/><circle cx="12" cy="10" r="1"/><circle cx="16" cy="10" r="1"/><circle cx="8" cy="14" r="1"/><circle cx="12" cy="14" r="1"/><circle cx="16" cy="14" r="1"/><circle cx="12" cy="18" r="1"/></svg>
+        <span>Use PIN</span>
+      </button>
+      <button id="btnMgr" class="btn icon mgrBtn" aria-label="Manager" title="Manager Portal">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
     </div>
   </div>
 </section>
 
 <!-- ===== KEYPAD SHEET (staff PIN + manager PIN) ===== -->
 <section id="keypad" class="sheet">
-  <div class="sheetBox">
-    <div id="kpTitle" class="kpTitle">Enter PIN</div>
+  <div class="sheetBox kpBox">
+    <div class="kpHeader">
+      <div class="kpIcon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <div id="kpTitle" class="kpTitle">Enter PIN</div>
+      <div id="kpSub" class="kpSub">Enter your 4-digit security code</div>
+    </div>
     <div id="kpDots" class="kpDots"></div>
     <div class="kpGrid">
       <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
       <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
       <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
-      <button data-k="x" class="kpX">Cancel</button><button data-k="0">0</button><button data-k="b" class="kpB">&#9003;</button>
+      <button data-k="x" class="kpX">Cancel</button><button data-k="0">0</button><button data-k="b" class="kpB" aria-label="Backspace">&#9003;</button>
     </div>
   </div>
 </section>
@@ -59,84 +128,230 @@
 <!-- ===== MANAGER ===== -->
 <section id="mgr" class="view">
   <header class="mgrHead">
-    <button id="btnBack" class="btn">&larr; Kiosk</button>
-    <div class="mgrTitle">Manager</div>
+    <button id="btnBack" class="btn backBtn">&larr; Kiosk</button>
+    <div class="mgrBrandTitle">
+      <div class="mgrTitle">Manager</div>
+      <span id="mgrSiteBadge" class="mgrSiteBadge"></span>
+    </div>
     <nav class="tabs">
-      <button data-tab="enrol" class="tab on">Enrol</button>
-      <button data-tab="staff" class="tab">Staff</button>
-      <button data-tab="log" class="tab">Log</button>
-      <button data-tab="settings" class="tab">Settings</button>
+      <button data-tab="enrol" class="tab on">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="10" r="3"/><path d="M7 18a5 5 0 0 1 10 0"/></svg>
+        <span>Enrol</span>
+      </button>
+      <button data-tab="staff" class="tab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>Staff</span>
+        <span id="tabStaffBadge" class="tabBadge" hidden></span>
+      </button>
+      <button data-tab="log" class="tab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span>Log</span>
+        <span id="tabLogBadge" class="tabBadge" hidden></span>
+      </button>
+      <button data-tab="settings" class="tab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>Settings</span>
+      </button>
     </nav>
     <img class="brand" src="brand/isabi-header.svg" alt="ISABI Systems">
   </header>
 
+  <div id="mgrPinBanner" class="pinBanner" hidden>
+    <span>&#9888; Security notice: Manager PIN is still set to the factory default (9999).</span>
+    <button id="btnBannerPin" class="btn small primary" type="button">Change PIN now</button>
+  </div>
+
+  <!-- TAB: ENROL -->
   <div id="tab-enrol" class="panel on">
     <div class="split">
-      <div class="col">
-        <label>Staff member</label>
-        <input id="enSearch" type="search" placeholder="Search name…" autocomplete="off">
+      <div class="col surfaceCard">
+        <div class="colHeader">
+          <div>
+            <div class="cardTitle">Staff Directory</div>
+            <div id="enCoverageTxt" class="muted">Select an employee to enrol</div>
+          </div>
+          <span id="enCoveragePct" class="covPill">0%</span>
+        </div>
+        <div class="covBar"><div id="enCoverageFill" class="covFill"></div></div>
+
+        <input id="enSearch" type="search" placeholder="Search staff by name…" autocomplete="off">
+        <div id="enFilter" class="chipRow">
+          <button type="button" data-ef="all" class="chip on">All</button>
+          <button type="button" data-ef="missing" class="chip">Needs Face</button>
+          <button type="button" data-ef="ready" class="chip">Face Ready</button>
+          <button type="button" data-ef="pin" class="chip">Has PIN</button>
+        </div>
         <div id="enList" class="list"></div>
         <p class="help">Enrol each person once, in the light they will clock in under. Three samples: straight, slightly left, slightly right. Glasses or a scarf on if they wear them at work (re-enrol if that changes). Tick the consent box and press <b>Save enrolment</b>, then use <b>Test recognition</b> to see the live match and its gap to the next closest colleague.</p>
       </div>
-      <div class="col">
-        <div id="enWho" class="enWho">Pick a staff member on the left.</div>
+
+      <div class="col surfaceCard enrolStudio">
+        <div class="enWhoBar">
+          <div id="enWho" class="enWho">Pick a staff member on the left.</div>
+          <span id="enPinState" class="pinStateBadge muted"></span>
+        </div>
+
+        <div id="enStepper" class="poseStepper">
+          <div class="stepItem" data-step="0"><span class="stepNum">1</span><span>Straight</span></div>
+          <div class="stepLine"></div>
+          <div class="stepItem" data-step="1"><span class="stepNum">2</span><span>Slightly Left</span></div>
+          <div class="stepLine"></div>
+          <div class="stepItem" data-step="2"><span class="stepNum">3</span><span>Slightly Right</span></div>
+        </div>
+
         <div class="enCam"><video id="enVideo" autoplay muted playsinline></video><div id="enGuide" class="guide" hidden></div></div>
         <div id="enPose" class="pose"></div>
         <div id="enSamples" class="samples"></div>
-        <label class="check"><input id="enConsent" type="checkbox" disabled> Employee agrees to the storage of a face template for attendance.</label>
-        <div class="row">
+
+        <label class="check consentBox"><input id="enConsent" type="checkbox" disabled> <span>Employee agrees to the storage of a mathematical face template for attendance verification.</span></label>
+
+        <div class="row actionRow">
           <button id="enCapture" class="btn primary" disabled>Capture sample</button>
           <button id="enSave" class="btn primary" disabled>Save enrolment</button>
           <button id="enClear" class="btn ghost" disabled>Clear samples</button>
         </div>
-        <div class="row">
+        <div class="row utilRow">
           <button id="enTest" class="btn">Test recognition</button>
           <button id="enPin" class="btn" disabled>Set PIN</button>
-          <span id="enPinState" class="muted"></span>
         </div>
         <div id="enTestOut" class="testOut"></div>
       </div>
     </div>
   </div>
 
+  <!-- TAB: STAFF -->
   <div id="tab-staff" class="panel">
-    <div class="row">
-      <button id="stRefresh" class="btn">Refresh roster from server</button>
-      <span id="stInfo" class="muted"></span>
+    <div id="stKpis" class="kpiGrid">
+      <div class="kpiCard"><div class="kpiLabel">Active Roster</div><div id="kpiStTotal" class="kpiVal">0</div><div class="kpiSub">Assigned to this site</div></div>
+      <div class="kpiCard ok"><div class="kpiLabel">Face ID Ready</div><div id="kpiStFace" class="kpiVal">0</div><div id="kpiStFaceSub" class="kpiSub">3 / 3 samples stored</div></div>
+      <div class="kpiCard brass"><div class="kpiLabel">PIN Configured</div><div id="kpiStPin" class="kpiVal">0</div><div class="kpiSub">4-digit fallback active</div></div>
+      <div class="kpiCard warn"><div class="kpiLabel">Needs Setup</div><div id="kpiStMissing" class="kpiVal">0</div><div class="kpiSub">No face or PIN yet</div></div>
     </div>
-    <table class="tbl" id="stTable"><thead><tr><th>Name</th><th>Samples</th><th>PIN</th><th>Active</th><th></th></tr></thead><tbody></tbody></table>
+
+    <div class="toolbarCard">
+      <div class="toolbarLeft">
+        <input id="stSearch" type="search" placeholder="Filter staff by name…" autocomplete="off" class="toolbarSearch">
+        <div id="stFilter" class="chipRow">
+          <button type="button" data-sf="all" class="chip on">All</button>
+          <button type="button" data-sf="face" class="chip">Face Ready</button>
+          <button type="button" data-sf="pin" class="chip">PIN Only</button>
+          <button type="button" data-sf="none" class="chip">Not Enrolled</button>
+        </div>
+      </div>
+      <div class="toolbarRight">
+        <span id="stInfo" class="muted"></span>
+        <button id="stRefresh" class="btn primary">Refresh roster from server</button>
+      </div>
+    </div>
+
+    <div class="tableCard">
+      <table class="tbl" id="stTable">
+        <thead><tr><th>Name</th><th>Samples</th><th>PIN</th><th>Active</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
 
+  <!-- TAB: LOG -->
   <div id="tab-log" class="panel">
-    <div class="row">
-      <input id="logDay" type="date">
-      <button id="logManual" class="btn">Manual punch</button>
-      <button id="logSync" class="btn">Sync now</button>
-      <span id="logInfo" class="muted"></span>
+    <div id="logKpis" class="kpiGrid">
+      <div class="kpiCard ok"><div class="kpiLabel">Currently On-Site</div><div id="kpiLogOnSite" class="kpiVal">0</div><div id="kpiLogOnSiteSub" class="kpiSub">Last punch = IN</div></div>
+      <div class="kpiCard brass"><div class="kpiLabel">Staff Seen</div><div id="kpiLogStaff" class="kpiVal">0</div><div id="kpiLogStaffSub" class="kpiSub">Unique employees</div></div>
+      <div class="kpiCard"><div class="kpiLabel">Clock Events</div><div id="kpiLogEvents" class="kpiVal">0</div><div id="kpiLogEventsSub" class="kpiSub">0 IN · 0 OUT</div></div>
+      <div class="kpiCard"><div class="kpiLabel">Cloud Sync</div><div id="kpiLogSync" class="kpiVal">Synced</div><div id="logInfo" class="kpiSub muted"></div></div>
     </div>
-    <table class="tbl" id="logTable"><thead><tr><th></th><th>Staff</th><th>Time</th><th>Dir</th><th>Via</th><th>Sync</th><th></th></tr></thead><tbody></tbody></table>
+
+    <div class="toolbarCard">
+      <div class="toolbarLeft">
+        <div class="dateNav">
+          <button id="logPrev" class="btn small ghost" type="button" title="Previous day">&larr;</button>
+          <input id="logDay" type="date">
+          <button id="logNext" class="btn small ghost" type="button" title="Next day">&rarr;</button>
+          <button id="logToday" class="btn small ghost" type="button">Today</button>
+        </div>
+        <input id="logSearch" type="search" placeholder="Search staff…" autocomplete="off" class="toolbarSearch">
+        <div id="logFilter" class="chipRow">
+          <button type="button" data-lf="all" class="chip on">All</button>
+          <button type="button" data-lf="in" class="chip">IN</button>
+          <button type="button" data-lf="out" class="chip">OUT</button>
+          <button type="button" data-lf="unsynced" class="chip">Pending Sync</button>
+        </div>
+      </div>
+      <div class="toolbarRight">
+        <button id="logShiftsToggle" class="btn small" type="button">Shift Summary</button>
+        <button id="logExport" class="btn small" type="button">Export CSV</button>
+        <button id="logManual" class="btn primary">+ Manual punch</button>
+        <button id="logSync" class="btn">Sync now</button>
+      </div>
+    </div>
+
+    <div id="logShiftsPanel" class="shiftsPanel" hidden>
+      <div class="shiftsHead">
+        <span class="cardTitle">Daily Shift Pairing &amp; Hours Summary</span>
+        <span id="logShiftsSummary" class="muted"></span>
+      </div>
+      <div id="logShiftsBody" class="shiftsGrid"></div>
+    </div>
+
+    <div class="tableCard">
+      <table class="tbl" id="logTable">
+        <thead><tr><th></th><th>Staff</th><th>Time</th><th>Dir</th><th>Via</th><th>Sync</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
 
+  <!-- TAB: SETTINGS -->
   <div id="tab-settings" class="panel">
-    <div class="form">
-      <label>Site <select id="setSite"></select></label>
-      <label>Device name <input id="setDevice" placeholder="e.g. La Una gate tablet"></label>
-      <div class="grid2">
-        <label>Match threshold (0.40 strict … 0.60 loose) <input id="setThreshold" type="number" step="0.01" min="0.3" max="0.7"></label>
-        <label class="check tall"><input id="setLive" type="checkbox"> Liveness check: ask for a blink before each face punch (anti-photo)</label>
+    <div class="settingsGrid form">
+      <div class="surfaceCard settingsCard">
+        <div class="cardTitle">Site &amp; Terminal Identity</div>
+        <label>Assigned Site / Business Unit <select id="setSite"></select></label>
+        <label>Device Name <input id="setDevice" placeholder="e.g. La Una Main Gate Tablet"></label>
+        <label class="check tall"><input id="setSound" type="checkbox" checked> Play audio confirmation chimes on clock events &amp; keypad</label>
+        <div class="row">
+          <button id="setSave" class="btn primary">Save</button>
+          <button id="setFull" class="btn">Full screen</button>
+        </div>
       </div>
-      <div class="row">
-        <button id="setSave" class="btn primary">Save</button>
-        <button id="setSync" class="btn">Sync now</button>
-        <button id="setRoster" class="btn">Refresh roster</button>
-        <button id="setRestore" class="btn">Restore enrolments from server</button>
+
+      <div class="surfaceCard settingsCard">
+        <div class="cardTitle">Biometric Engine &amp; Liveness</div>
+        <div class="grid2">
+          <label>Match threshold (0.40 strict … 0.60 loose) <input id="setThreshold" type="number" step="0.01" min="0.3" max="0.7"></label>
+          <label class="check tall"><input id="setLive" type="checkbox"> <span>Liveness check: ask for a blink before each face punch (anti-photo)</span></label>
+        </div>
+        <div class="thresholdScale">
+          <span>0.40 Strict</span>
+          <span>0.50 Balanced (Default)</span>
+          <span>0.60 Loose</span>
+        </div>
+        <div class="row">
+          <button id="setCalib" class="btn">Calibration report</button>
+        </div>
       </div>
-      <div class="row">
-        <button id="setMgrPin" class="btn">Change manager PIN</button>
-        <button id="setCalib" class="btn">Calibration report</button>
-        <button id="setFull" class="btn">Full screen</button>
-        <button id="setReset" class="btn danger">Reset device</button>
+
+      <div class="surfaceCard settingsCard">
+        <div class="cardTitle">Cloud Sync &amp; Roster Management</div>
+        <p class="muted settingsDesc">Punches and enrolments queue locally in IndexedDB and sync automatically to Dataverse when online.</p>
+        <div class="row">
+          <button id="setSync" class="btn primary">Sync now</button>
+          <button id="setRoster" class="btn">Refresh roster</button>
+          <button id="setRestore" class="btn">Restore enrolments from server</button>
+        </div>
       </div>
+
+      <div class="surfaceCard settingsCard">
+        <div class="cardTitle">Security &amp; Device Maintenance</div>
+        <p class="muted settingsDesc">Protect manager administration with a custom 4-digit PIN. Resetting wipes local storage on this tablet only.</p>
+        <div class="row">
+          <button id="setMgrPin" class="btn">Change manager PIN</button>
+          <button id="setReset" class="btn danger">Reset device</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="diagnosticsStack">
       <pre id="calibOut" class="info calib"></pre>
       <pre id="setInfo" class="info"></pre>
     </div>
@@ -147,13 +362,23 @@
 <section id="manual" class="sheet">
   <div class="sheetBox wide">
     <div class="kpTitle">Manual punch</div>
+    <div class="kpSub">Record a manager-verified attendance event</div>
     <input id="mnSearch" type="search" placeholder="Search name…" autocomplete="off">
     <div id="mnList" class="list"></div>
-    <div class="row">
-      <button id="mnIn" class="btn primary" disabled>Clock IN</button>
-      <button id="mnOut" class="btn primary" disabled>Clock OUT</button>
+    <div class="row manualActions">
+      <button id="mnIn" class="btn primary inBtn" disabled>Clock IN</button>
+      <button id="mnOut" class="btn primary outBtn" disabled>Clock OUT</button>
       <button id="mnCancel" class="btn ghost">Cancel</button>
     </div>
+  </div>
+</section>
+
+<!-- snapshot preview modal -->
+<section id="photoModal" class="sheet">
+  <div class="sheetBox photoBox">
+    <img id="photoModalImg" alt="Audit snapshot">
+    <div id="photoModalMeta" class="photoModalMeta"></div>
+    <button id="photoModalClose" class="btn wide" type="button">Close</button>
   </div>
 </section>
 
@@ -161,11 +386,11 @@
 <canvas id="snap" hidden></canvas>
 
 <script src="vendor/face-api.js"></script>
-<script src="js/config.js?v=0.2.4"></script>
-<script src="js/endpoints.js?v=0.2.4"></script>
-<script src="js/db.js?v=0.2.4"></script>
-<script src="js/face.js?v=0.2.4"></script>
-<script src="js/sync.js?v=0.2.4"></script>
-<script src="js/app.js?v=0.2.4"></script>
+<script src="js/config.js?v=0.3.0"></script>
+<script src="js/endpoints.js?v=0.3.0"></script>
+<script src="js/db.js?v=0.3.0"></script>
+<script src="js/face.js?v=0.3.0"></script>
+<script src="js/sync.js?v=0.3.0"></script>
+<script src="js/app.js?v=0.3.0"></script>
 </body>
 </html>

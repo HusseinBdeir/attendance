@@ -10,8 +10,10 @@
 
   const state = {
     site: C.defaultSite,
+    device: "",
     threshold: C.match.threshold,   // per-device override lives in meta "threshold"
     liveness: C.liveness.enabled,   // per-device override lives in meta "liveness"
+    sound: true,                    // per-device override lives in meta "sound"
     faces: [],            // [{id, staffId, d}] in memory for matching
     staff: new Map(),     // id -> {id, name, officialName, pinhash, active}
     stream: null,
@@ -27,6 +29,9 @@
     cardPunch: null,
     mgrOpen: false,
     enrol: { staffId: null, samples: [], pin: null },
+    enFilter: "all",
+    stFilter: "all",
+    logFilter: "all",
     testing: false,       // "Test recognition" loop in the Enrol tab
     manualStaff: null,
     wake: null,
@@ -41,6 +46,8 @@
       ts: d.toISOString(),
       day: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
       hhmm: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+      sec: `:${pad(d.getSeconds())}`,
+      dateStr: d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" }),
       tzOffsetMin: -d.getTimezoneOffset(),
     };
   }
@@ -52,12 +59,76 @@
   const fmtTime = iso => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
   const r3 = v => Math.round(v * 1000) / 1000;
   const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const initials = name => String(name || "?").trim().split(/\s+/).slice(0, 2).map(w => w[0] || "").join("").toUpperCase() || "?";
+
   let toastT = null;
   function toast(msg, bad, ms) {
     const t = $("toast"); t.textContent = msg; t.className = "toast on" + (bad ? " bad" : "");
     clearTimeout(toastT); toastT = setTimeout(() => t.className = "toast", ms || 2600);
   }
-  function hint(msg, warn) { const h = $("hint"); h.textContent = msg; h.className = "hint" + (warn ? " warn" : ""); }
+  function hint(msg, warn, mode) {
+    const h = $("hint");
+    h.textContent = msg;
+    h.className = "hint" + (warn ? " warn" : "") + (mode ? " " + mode : "");
+  }
+  function setStreakProgress(frac) {
+    const bar = $("streakBar"), fill = $("streakFill");
+    if (!bar || !fill) return;
+    if (!frac || frac <= 0) { bar.classList.remove("on"); fill.style.width = "0%"; }
+    else { bar.classList.add("on"); fill.style.width = `${Math.min(100, Math.round(frac * 100))}%`; }
+  }
+
+  // ---------- synthesized Web Audio feedback (zero external files, 100% offline) ----------
+  const Sound = (() => {
+    let ctx = null;
+    function getCtx() {
+      if (navigator.webdriver || !state.sound) return null;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      if (!ctx) ctx = new AC();
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      return ctx;
+    }
+    function tone(freq, dur, delay, type, gainVal) {
+      try {
+        const c = getCtx(); if (!c) return;
+        const t0 = c.currentTime + (delay || 0);
+        const osc = c.createOscillator(), g = c.createGain();
+        osc.type = type || "sine";
+        osc.frequency.setValueAtTime(freq, t0);
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(gainVal || 0.12, t0 + 0.015);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        osc.connect(g); g.connect(c.destination);
+        osc.start(t0); osc.stop(t0 + dur + 0.02);
+      } catch (e) { /* audio blocked or unsupported */ }
+    }
+    return {
+      play(kind) {
+        if (!state.sound || navigator.webdriver) return;
+        if (kind === "in") { tone(587.33, 0.14, 0, "sine", 0.14); tone(880, 0.24, 0.11, "triangle", 0.16); }
+        else if (kind === "out") { tone(783.99, 0.14, 0, "sine", 0.13); tone(523.25, 0.24, 0.11, "triangle", 0.14); }
+        else if (kind === "warn") { tone(349.23, 0.12, 0, "triangle", 0.12); tone(311.13, 0.18, 0.13, "triangle", 0.12); }
+        else if (kind === "capture") { tone(1046.5, 0.09, 0, "sine", 0.1); }
+        else if (kind === "tap") { tone(660, 0.035, 0, "sine", 0.05); }
+      }
+    };
+  })();
+
+  function updateSoundUi() {
+    if ($("icoSoundOn")) $("icoSoundOn").hidden = !state.sound;
+    if ($("icoSoundOff")) $("icoSoundOff").hidden = !!state.sound;
+    if ($("setSound")) $("setSound").checked = !!state.sound;
+  }
+  if ($("btnSound")) {
+    $("btnSound").addEventListener("click", async () => {
+      state.sound = !state.sound;
+      await DBX.setMeta("sound", state.sound);
+      updateSoundUi();
+      if (state.sound) Sound.play("tap");
+      toast(state.sound ? "Sound effects enabled" : "Sound effects muted");
+    });
+  }
 
   function snapshot(src) {
     const cv = $("snap");
@@ -72,7 +143,7 @@
     } catch (e) { return ""; }
   }
 
-  // ---------- face frame overlay ----------
+  // ---------- face frame overlay (biometric HUD reticle) ----------
   // The video is object-fit: cover and mirrored by CSS; the canvas gets the same
   // mirror, so boxes are drawn in video coordinates mapped through the cover scale.
   function drawOverlay(det, status) {
@@ -88,21 +159,66 @@
     const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
     const b = det.box;
     const x = b.x * s + ox, y = b.y * s + oy, w = b.width * s, h = b.height * s;
-    const col = { ok: "#22c55e", live: "#38bdf8", warn: "#f59e0b", unknown: "#f59e0b", far: "#94a3b8", scan: "#c9a227" }[status] || "#c9a227";
+    const col = { ok: "#22c55e", live: "#38bdf8", warn: "#f59e0b", unknown: "#f59e0b", far: "#94a3b8", scan: "#d4af37" }[status] || "#d4af37";
     const L = Math.min(w, h) * 0.22;
-    g.lineWidth = 4; g.strokeStyle = col; g.lineCap = "round";
-    const corner = (cx, cy, dx, dy) => { g.beginPath(); g.moveTo(cx + dx * L, cy); g.lineTo(cx, cy); g.lineTo(cx, cy + dy * L); g.stroke(); };
-    corner(x, y, 1, 1); corner(x + w, y, -1, 1); corner(x, y + h, 1, -1); corner(x + w, y + h, -1, -1);
+
+    g.save();
+    // Subtle frame outline
+    g.strokeStyle = col + "33";
+    g.lineWidth = 1.5;
+    g.strokeRect(x, y, w, h);
+
+    // Glowing corner brackets
+    g.shadowColor = col;
+    g.shadowBlur = 12;
+    g.lineWidth = 4;
+    g.strokeStyle = col;
+    g.lineCap = "round";
+    const corner = (cx, cy, dx, dy) => {
+      g.beginPath();
+      g.moveTo(cx + dx * L, cy);
+      g.lineTo(cx, cy);
+      g.lineTo(cx, cy + dy * L);
+      g.stroke();
+    };
+    corner(x, y, 1, 1);
+    corner(x + w, y, -1, 1);
+    corner(x, y + h, 1, -1);
+    corner(x + w, y + h, -1, -1);
+
+    // Midpoint reticle ticks
+    g.shadowBlur = 0;
+    g.lineWidth = 2;
+    const tick = 6;
+    g.beginPath();
+    g.moveTo(x + w / 2, y - tick / 2); g.lineTo(x + w / 2, y + tick / 2);
+    g.moveTo(x + w / 2, y + h - tick / 2); g.lineTo(x + w / 2, y + h + tick / 2);
+    g.moveTo(x - tick / 2, y + h / 2); g.lineTo(x + tick / 2, y + h / 2);
+    g.moveTo(x + w - tick / 2, y + h / 2); g.lineTo(x + w + tick / 2, y + h / 2);
+    g.stroke();
+    g.restore();
   }
 
-  // ---------- keypad (with lockout) ----------
+  // ---------- keypad (with live lockout countdown & keyboard support) ----------
   const Keypad = (() => {
-    let buf = "", cb = null, len = C.pinLength, fails = 0, lockedUntil = 0, title = "";
+    let buf = "", cb = null, len = C.pinLength, fails = 0, lockedUntil = 0, title = "", lockTimer = null;
     const locked = () => Date.now() < lockedUntil;
-    const remaining = () => Math.ceil((lockedUntil - Date.now()) / 1000);
+    const remaining = () => Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000));
     function render() {
       $("kpDots").innerHTML = Array.from({ length: len }, (_, i) => `<i class="${i < buf.length ? "on" : ""}"></i>`).join("");
       $("kpTitle").textContent = locked() ? `Too many attempts — wait ${remaining()} s` : title;
+      if ($("kpSub")) {
+        $("kpSub").textContent = locked()
+          ? "Keypad temporarily locked for security"
+          : (title.toLowerCase().includes("manager") ? "Enter 4-digit administrator PIN" : "Enter 4-digit security PIN");
+      }
+    }
+    function startLockTicker() {
+      clearInterval(lockTimer);
+      lockTimer = setInterval(() => {
+        if (!locked()) { clearInterval(lockTimer); lockTimer = null; }
+        if ($("keypad").classList.contains("open")) render();
+      }, 500);
     }
     function open(t, onDone, length) {
       buf = ""; cb = onDone; len = length || C.pinLength; title = t;
@@ -112,46 +228,67 @@
     }
     function close() { $("keypad").classList.remove("open"); buf = ""; cb = null; state.busy = false; }
     function shake() {
+      Sound.play("warn");
       const d = $("kpDots"); d.classList.add("shake");
       setTimeout(() => { d.classList.remove("shake"); buf = ""; render(); }, 450);
     }
-    $("keypad").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
-      const k = b.dataset.k;
+    async function pressKey(k) {
       if (k === "x") { const c = cb; close(); if (c) c(null); return; }
       if (locked()) { render(); return; }
-      if (k === "b") { buf = buf.slice(0, -1); render(); return; }
+      if (k === "b") { buf = buf.slice(0, -1); Sound.play("tap"); render(); return; }
       if (buf.length >= len) return;
+      Sound.play("tap");
       buf += k; render();
       if (buf.length === len) {
         const pin = buf; const c = cb;
         const ok = await c(pin);
         if (ok === false) {
           fails++;
-          if (fails >= C.pinLockAfter) { lockedUntil = Date.now() + C.pinLockSec * 1000; fails = 0; }
+          if (fails >= C.pinLockAfter) {
+            lockedUntil = Date.now() + C.pinLockSec * 1000;
+            fails = 0;
+            startLockTicker();
+          }
           shake();
         } else { fails = 0; close(); }
       }
-    }));
+    }
+    $("keypad").querySelectorAll("button").forEach(b => b.addEventListener("click", () => pressKey(b.dataset.k)));
+    document.addEventListener("keydown", e => {
+      if (!$("keypad").classList.contains("open")) return;
+      if (e.key >= "0" && e.key <= "9") { e.preventDefault(); pressKey(e.key); }
+      else if (e.key === "Backspace") { e.preventDefault(); pressKey("b"); }
+      else if (e.key === "Escape") { e.preventDefault(); pressKey("x"); }
+    });
     return {
       open, close, shake,
       get isOpen() { return $("keypad").classList.contains("open"); },
       get locked() { return locked(); },
-      unlock() { lockedUntil = 0; fails = 0; render(); },
+      unlock() { lockedUntil = 0; fails = 0; clearInterval(lockTimer); render(); },
     };
   })();
 
   // ---------- data ----------
   async function loadData() {
     state.site = await DBX.getMeta("site", C.defaultSite);
+    state.device = await DBX.getMeta("device", "");
     const t = parseFloat(await DBX.getMeta("threshold", ""));
     state.threshold = (t > 0 && t < 1) ? t : C.match.threshold;
     const lv = await DBX.getMeta("liveness", null);
     state.liveness = lv == null ? C.liveness.enabled : !!lv;
+    const snd = await DBX.getMeta("sound", null);
+    state.sound = snd == null ? true : !!snd;
     state.defaultPin = !(await DBX.getMeta("mgrPinHash", ""));
     const staff = await DBX.allStaff();
     state.staff = new Map(staff.map(s => [s.id, s]));
     state.faces = (await DBX.allFaces()).filter(f => Array.isArray(f.d) && f.d.length === 128);
-    $("siteName").textContent = (C.sites[state.site] || {}).name || state.site;
+    const siteLabel = (C.sites[state.site] || {}).name || state.site;
+    $("siteName").textContent = siteLabel;
+    if ($("mgrSiteBadge")) $("mgrSiteBadge").textContent = siteLabel;
+    if ($("kioskDevice")) $("kioskDevice").textContent = state.device || "";
+    if ($("mgrPinBanner")) $("mgrPinBanner").hidden = !state.defaultPin;
+    updateSoundUi();
+    await updateKioskHud();
   }
   function usableFaces() {
     // only staff with >= minSamples samples and an active roster entry
@@ -160,6 +297,32 @@
     return state.faces.filter(f => count.get(f.staffId) >= C.match.minSamples && (state.staff.get(f.staffId) || {}).active !== false);
   }
   const staffNames = () => new Map([...state.staff.values()].map(s => [s.id, s.name]));
+
+  // Live HUD counters on kiosk & manager tabs
+  async function updateKioskHud() {
+    try {
+      const todayRows = (await DBX.punchesForDay(nowLocal().day)).filter(p => !p.void);
+      todayRows.sort((a, b) => a.ts.localeCompare(b.ts));
+      const latestByStaff = new Map();
+      todayRows.forEach(p => latestByStaff.set(p.staffId, p));
+      let onSite = 0;
+      latestByStaff.forEach(p => { if (p.direction === "in") onSite++; });
+      if ($("onSiteCount")) $("onSiteCount").textContent = `${onSite} on-site`;
+
+      const enrolledPersons = new Set(usableFaces().map(f => f.staffId)).size;
+      const activeTotal = [...state.staff.values()].filter(s => s.active !== false).length;
+      if ($("kioskStats")) {
+        $("kioskStats").textContent = activeTotal
+          ? `${enrolledPersons} / ${activeTotal} Face IDs Ready · ${todayRows.length} events today`
+          : "Face ID & PIN Ready";
+      }
+      if ($("tabStaffBadge")) {
+        const missing = [...state.staff.values()].filter(s => s.active !== false && sampleCount(s.id) < C.match.minSamples && !s.pinhash).length;
+        $("tabStaffBadge").textContent = String(missing);
+        $("tabStaffBadge").hidden = missing === 0;
+      }
+    } catch (e) { /* ignore during early boot */ }
+  }
 
   // ---------- punching ----------
   async function lastPunchToday(staffId) {
@@ -187,6 +350,7 @@
     state.lastPunchAt.set(staffId, Date.now());
     showCard(st, p, false);
     updateSyncDot();
+    updateKioskHud();
     Sync.run("punch").catch(() => {});
     return p;
   }
@@ -196,14 +360,32 @@
     state.cardPunch = already ? null : p;
     $("cardImg").src = p.snapshot || "icon.svg";
     $("cardName").textContent = st.name;
+    if ($("cardSub")) $("cardSub").textContent = (st.officialName && st.officialName !== st.name) ? st.officialName : "";
     const dir = p.direction.toUpperCase();
+    if ($("cardBadge")) $("cardBadge").textContent = already ? "ALREADY CLOCKED" : `CLOCKED ${dir}`;
+    if ($("cardAvatarBadge")) $("cardAvatarBadge").innerHTML = already ? "&#8987;" : "&#10003;";
+    if ($("cardMeta")) {
+      const via = p.method === "face"
+        ? `Face ID${p.confidence != null ? ` · ${Math.max(50, Math.min(99, Math.round((1 - p.confidence * 0.65) * 100)))}% match` : ""}`
+        : (p.method === "pin" ? "PIN Verified" : "Manager Entry");
+      $("cardMeta").textContent = via;
+    }
     $("cardLine").innerHTML = already
       ? `Already clocked <b>${dir}</b> at ${fmtTime(p.ts)}`
       : `Clocked <b>${dir}</b> at ${fmtTime(p.ts)}`;
     card.className = "card " + (already ? "warn" : p.direction);
     $("cardFlip").style.display = already ? "none" : "";
     $("cardFlip").textContent = `Wrong? Switch to ${p.direction === "in" ? "OUT" : "IN"}`;
+    if ($("cardBar")) {
+      const b = $("cardBar");
+      b.classList.remove("run");
+      b.style.setProperty("--card-ms", `${C.punch.cardSeconds * 1000}ms`);
+      void b.offsetWidth;
+      b.classList.add("run");
+    }
+    Sound.play(already ? "warn" : p.direction);
     state.busy = true;
+    setStreakProgress(0);
     drawOverlay(null);
     clearTimeout(state.cardTimer);
     state.cardTimer = setTimeout(hideCard, C.punch.cardSeconds * 1000);
@@ -215,12 +397,15 @@
     if (!Keypad.isOpen && !state.mgrOpen) state.busy = false;
     hint("Look at the camera");
   }
+  if ($("cardDismiss")) $("cardDismiss").addEventListener("click", hideCard);
   $("cardFlip").addEventListener("click", async () => {
     const p = state.cardPunch; if (!p) return;
     p.direction = p.direction === "in" ? "out" : "in";
     p.synced = 0;                       // re-push: the server upserts on id
     await DBX.savePunch(p);
     showCard(state.staff.get(p.staffId), p, false);
+    updateSyncDot();
+    updateKioskHud();
     Sync.run("flip").catch(() => {});
   });
 
@@ -241,7 +426,7 @@
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") keepAwake(); });
 
-  function resetStreak() { state.streak = { staffId: null, n: 0, dist: [] }; }
+  function resetStreak() { state.streak = { staffId: null, n: 0, dist: [] }; setStreakProgress(0); }
 
   // Frame-level gate (face size) then descriptor matching.
   async function handleDetection(det, src) {
@@ -263,14 +448,15 @@
       else state.streak = { staffId: m.staffId, n: 1, dist: [m.distance] };
       const st = state.staff.get(m.staffId);
       drawOverlay(det, "ok");
-      hint(`Hello ${st ? st.name : ""}…`);
+      setStreakProgress(state.streak.n / C.match.confirmFrames);
+      hint(`Hello ${st ? st.name : ""}…`, false, "ok");
       if (state.streak.n >= C.match.confirmFrames) {
         const mean = state.streak.dist.reduce((a, b) => a + b, 0) / state.streak.dist.length;
         const weak = mean > C.match.weakAbove;
         resetStreak();
         if (state.liveness) {
           state.live = { staffId: m.staffId, distance: mean, weak, until: Date.now() + C.liveness.windowSec * 1000, closed: false };
-          hint("Please blink to confirm");
+          hint("Please blink to confirm", false, "live");
           return { matched: true, staffId: m.staffId, distance: m.distance, liveness: "pending" };
         }
         await punch(m.staffId, "face", mean, src, null, weak ? `weak match ${r3(mean)}` : "");
@@ -352,6 +538,7 @@
     await DBX.setMeta("mgrPinHash", await sha256(pin));
     await DBX.delMeta("mgrPin");
     state.defaultPin = false;
+    if ($("mgrPinBanner")) $("mgrPinBanner").hidden = true;
   }
   $("btnMgr").addEventListener("click", () => {
     state.live = null;
@@ -362,20 +549,39 @@
       return true;
     });
   });
+  if ($("btnBannerPin")) {
+    $("btnBannerPin").addEventListener("click", () => {
+      Keypad.open("New manager PIN", async pin => {
+        if (pin === null) return;
+        await setManagerPin(pin);
+        toast("Manager PIN changed");
+        renderSettings();
+        return true;
+      });
+    });
+  }
   function openManager() {
     state.mgrOpen = true; state.busy = true; state.live = null;
+    state.enFilter = "all"; state.stFilter = "all"; state.logFilter = "all";
+    if ($("enSearch")) $("enSearch").value = "";
+    if ($("stSearch")) $("stSearch").value = "";
+    if ($("logSearch")) $("logSearch").value = "";
+    document.querySelectorAll("#enFilter .chip").forEach(c => c.classList.toggle("on", c.dataset.ef === "all"));
+    document.querySelectorAll("#stFilter .chip").forEach(c => c.classList.toggle("on", c.dataset.sf === "all"));
+    document.querySelectorAll("#logFilter .chip").forEach(c => c.classList.toggle("on", c.dataset.lf === "all"));
     drawOverlay(null);
     $("kiosk").classList.remove("open"); $("mgr").classList.add("open");
     { const v = $("enVideo"); if (v.srcObject && v.paused) v.play().catch(() => {}); }
+    if ($("mgrPinBanner")) $("mgrPinBanner").hidden = !state.defaultPin;
     showTab("enrol"); renderEnrolList(""); renderStaff(); renderSettings();
     $("logDay").value = nowLocal().day; renderLog();
-    if (state.defaultPin) toast("Manager PIN is still the factory default — change it in Settings", true, 5000);
   }
   function closeManager() {
     stopTest();
     state.mgrOpen = false; state.busy = false;
     $("mgr").classList.remove("open"); $("kiosk").classList.add("open");
     hideCard();
+    updateKioskHud();
   }
   $("btnBack").addEventListener("click", closeManager);
   function showTab(name) {
@@ -447,12 +653,34 @@
       .sort((a, b) => a.name.localeCompare(b.name));
   }
   function sampleCount(staffId) { return state.faces.filter(f => f.staffId === staffId).length; }
+
+  function updateEnrolCoverage() {
+    const active = [...state.staff.values()].filter(s => s.active !== false);
+    const ready = active.filter(s => sampleCount(s.id) >= C.match.minSamples).length;
+    const pct = active.length ? Math.round((ready / active.length) * 100) : 0;
+    if ($("enCoverageTxt")) $("enCoverageTxt").textContent = active.length ? `${ready} of ${active.length} active staff enrolled with Face ID` : "Roster empty — refresh from server";
+    if ($("enCoveragePct")) $("enCoveragePct").textContent = `${pct}%`;
+    if ($("enCoverageFill")) $("enCoverageFill").style.width = `${pct}%`;
+  }
+
   function renderEnrolList(q) {
+    updateEnrolCoverage();
     const el = $("enList");
-    el.innerHTML = staffMatches(q).map(s => `<div data-id="${s.id}" class="${s.id === state.enrol.staffId ? "sel" : ""}">${esc(s.name)}<small>${sampleCount(s.id)} samples${s.pinhash ? " · PIN" : ""}</small></div>`).join("") || `<div class="muted">No staff in the roster. Settings → Refresh roster.</div>`;
+    let list = staffMatches(q);
+    if (state.enFilter === "missing") list = list.filter(s => sampleCount(s.id) < C.match.minSamples);
+    else if (state.enFilter === "ready") list = list.filter(s => sampleCount(s.id) >= C.match.minSamples);
+    else if (state.enFilter === "pin") list = list.filter(s => !!s.pinhash);
+
+    el.innerHTML = list.map(s => `<div data-id="${s.id}" class="${s.id === state.enrol.staffId ? "sel" : ""}">${esc(s.name)}<small>${sampleCount(s.id)} samples${s.pinhash ? " · PIN" : ""}</small></div>`).join("") || `<div class="muted">No staff in the roster. Settings → Refresh roster.</div>`;
     el.querySelectorAll("div[data-id]").forEach(d => d.addEventListener("click", () => selectEnrol(d.dataset.id)));
   }
   $("enSearch").addEventListener("input", e => renderEnrolList(e.target.value));
+  document.querySelectorAll("#enFilter .chip").forEach(btn => btn.addEventListener("click", () => {
+    state.enFilter = btn.dataset.ef;
+    document.querySelectorAll("#enFilter .chip").forEach(c => c.classList.toggle("on", c === btn));
+    renderEnrolList($("enSearch").value);
+  }));
+
   function selectEnrol(id) {
     const st = state.staff.get(id); if (!st) return;
     state.enrol = { staffId: id, samples: [], pin: null };
@@ -472,6 +700,16 @@
     $("enSave").disabled = !ready;
     $("enSave").classList.toggle("ready", !!ready && s.length > 0);
     $("enCapture").disabled = !state.enrol.staffId || s.length >= C.match.maxSamples;
+
+    // Update 3-step visual stepper
+    if ($("enStepper")) {
+      $("enStepper").querySelectorAll(".stepItem").forEach(item => {
+        const idx = parseInt(item.dataset.step, 10);
+        item.classList.toggle("done", !!state.enrol.staffId && idx < s.length);
+        item.classList.toggle("active", !!state.enrol.staffId && idx === s.length && s.length < target);
+      });
+    }
+
     const pose = $("enPose"), guide = $("enGuide");
     if (!state.enrol.staffId) { pose.textContent = ""; guide.hidden = true; guide.className = "guide"; }
     else if (s.length >= C.match.maxSamples) {
@@ -503,6 +741,7 @@
       return false;
     }
     state.enrol.samples.push({ d: Array.from(det.descriptor), thumb: snapshot(src) });
+    Sound.play("capture");
     renderSamples();
     return true;
   }
@@ -563,7 +802,7 @@
     $("enWho").textContent = "Pick a staff member on the left.";
     ["enCapture", "enClear", "enPin", "enConsent", "enSave"].forEach(x => $(x).disabled = true);
     $("enPinState").textContent = "";
-    renderEnrolList($("enSearch").value); renderSamples();
+    renderEnrolList($("enSearch").value); renderSamples(); renderStaff(); updateKioskHud();
     Sync.run("enrol").catch(() => {});
     return true;
   }
@@ -614,12 +853,41 @@
 
   // ----- staff -----
   function renderStaff() {
+    const allRows = [...state.staff.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const active = allRows.filter(s => s.active !== false);
+    const faceReady = active.filter(s => sampleCount(s.id) >= C.match.minSamples).length;
+    const pinReady = active.filter(s => !!s.pinhash).length;
+    const missing = active.filter(s => sampleCount(s.id) < C.match.minSamples && !s.pinhash).length;
+    if ($("kpiStTotal")) $("kpiStTotal").textContent = String(active.length);
+    if ($("kpiStFace")) $("kpiStFace").textContent = String(faceReady);
+    if ($("kpiStFaceSub")) $("kpiStFaceSub").textContent = active.length ? `${Math.round((faceReady / active.length) * 100)}% of active roster` : "3 / 3 samples stored";
+    if ($("kpiStPin")) $("kpiStPin").textContent = String(pinReady);
+    if ($("kpiStMissing")) $("kpiStMissing").textContent = String(missing);
+
+    const q = ($("stSearch") ? $("stSearch").value : "").trim().toLowerCase();
+    let rows = allRows.filter(s => !q || s.name.toLowerCase().includes(q) || (s.officialName || "").toLowerCase().includes(q));
+    if (state.stFilter === "face") rows = rows.filter(s => sampleCount(s.id) >= C.match.minSamples);
+    else if (state.stFilter === "pin") rows = rows.filter(s => !!s.pinhash && sampleCount(s.id) < C.match.minSamples);
+    else if (state.stFilter === "none") rows = rows.filter(s => sampleCount(s.id) < C.match.minSamples && !s.pinhash);
+
     const tb = $("stTable").querySelector("tbody");
-    const rows = [...state.staff.values()].sort((a, b) => a.name.localeCompare(b.name));
-    tb.innerHTML = rows.map(s => `<tr><td>${esc(s.name)}<br><small class="muted">${esc(s.officialName || "")}</small></td><td>${sampleCount(s.id)}${sampleCount(s.id) && sampleCount(s.id) < C.match.minSamples ? ` <span class="tag warn">below ${C.match.minSamples}</span>` : ""}</td><td>${s.pinhash ? "yes" : "—"}</td><td>${s.active === false ? "no" : "yes"}</td><td><button class="btn small" data-en="${s.id}">Enrol</button></td></tr>`).join("") || `<tr><td colspan="5" class="muted">Roster empty — refresh from the server.</td></tr>`;
+    tb.innerHTML = rows.map(s => {
+      const sc = sampleCount(s.id);
+      const sampleBadge = sc >= C.match.minSamples
+        ? `<span class="tag ok">${sc} / ${C.match.maxSamples} ready</span>`
+        : (sc > 0 ? `${sc} <span class="tag warn">below ${C.match.minSamples}</span>` : `<span class="muted">0</span>`);
+      return `<tr><td><div class="staffCell"><span class="avatarCircle">${esc(initials(s.name))}</span><div><b>${esc(s.name)}</b>${s.officialName ? `<br><small class="muted">${esc(s.officialName)}</small>` : ""}</div></div></td><td>${sampleBadge}</td><td>${s.pinhash ? `<span class="tag ok">yes</span>` : "—"}</td><td>${s.active === false ? `<span class="tag warn">no</span>` : "yes"}</td><td><button class="btn small" data-en="${s.id}">Enrol</button></td></tr>`;
+    }).join("") || `<tr><td colspan="5" class="muted">Roster empty — refresh from the server.</td></tr>`;
     tb.querySelectorAll("button[data-en]").forEach(b => b.addEventListener("click", () => { showTab("enrol"); selectEnrol(b.dataset.en); }));
     DBX.getMeta("rosterAt", "").then(at => $("stInfo").textContent = at ? `roster refreshed ${new Date(at).toLocaleString()}` : "roster never refreshed");
   }
+  if ($("stSearch")) $("stSearch").addEventListener("input", renderStaff);
+  document.querySelectorAll("#stFilter .chip").forEach(btn => btn.addEventListener("click", () => {
+    state.stFilter = btn.dataset.sf;
+    document.querySelectorAll("#stFilter .chip").forEach(c => c.classList.toggle("on", c === btn));
+    renderStaff();
+  }));
+
   async function refreshRoster(restore) {
     try {
       toast("Contacting server…");
@@ -631,24 +899,154 @@
   }
   $("stRefresh").addEventListener("click", () => refreshRoster(false));
 
-  // ----- log -----
+  // ----- log & shift pairing -----
+  function fmtDur(ms) {
+    const mins = Math.max(0, Math.round(ms / 60000));
+    const h = Math.floor(mins / 60), m = mins % 60;
+    return h > 0 ? `${h}h ${pad(m)}m` : `${m}m`;
+  }
+
+  function computeShifts(dayRows) {
+    const asc = [...dayRows].filter(p => !p.void).sort((a, b) => a.ts.localeCompare(b.ts));
+    const byStaff = new Map();
+    asc.forEach(p => {
+      if (!byStaff.has(p.staffId)) byStaff.set(p.staffId, { staffId: p.staffId, name: p.staffName, events: [] });
+      byStaff.get(p.staffId).events.push(p);
+    });
+    const out = [];
+    byStaff.forEach(g => {
+      let totalMs = 0, openIn = null, firstIn = null, lastOut = null;
+      g.events.forEach(ev => {
+        if (ev.direction === "in") {
+          if (!firstIn) firstIn = ev.ts;
+          if (!openIn) openIn = ev.ts;
+        } else if (ev.direction === "out") {
+          lastOut = ev.ts;
+          if (openIn) { totalMs += Math.max(0, new Date(ev.ts) - new Date(openIn)); openIn = null; }
+        }
+      });
+      const lastEv = g.events[g.events.length - 1];
+      const onSite = lastEv && lastEv.direction === "in";
+      out.push({
+        staffId: g.staffId,
+        name: g.name,
+        onSite,
+        firstIn,
+        lastOut,
+        totalMs,
+        eventsCount: g.events.length,
+      });
+    });
+    return out.sort((a, b) => (b.onSite - a.onSite) || a.name.localeCompare(b.name));
+  }
+
   async function renderLog() {
     const day = $("logDay").value || nowLocal().day;
-    const rows = (await DBX.punchesForDay(day)).sort((a, b) => b.ts.localeCompare(a.ts));
+    const allDayRows = (await DBX.punchesForDay(day)).sort((a, b) => b.ts.localeCompare(a.ts));
+    const shifts = computeShifts(allDayRows);
+    const onSiteList = shifts.filter(s => s.onSite);
+    const inCount = allDayRows.filter(p => p.direction === "in").length;
+    const outCount = allDayRows.filter(p => p.direction === "out").length;
+
+    if ($("kpiLogOnSite")) $("kpiLogOnSite").textContent = String(onSiteList.length);
+    if ($("kpiLogOnSiteSub")) $("kpiLogOnSiteSub").textContent = onSiteList.length ? onSiteList.map(s => s.name).join(", ") : "No staff currently clocked in";
+    if ($("kpiLogStaff")) $("kpiLogStaff").textContent = String(shifts.length);
+    if ($("kpiLogStaffSub")) $("kpiLogStaffSub").textContent = `Active on ${day}`;
+    if ($("kpiLogEvents")) $("kpiLogEvents").textContent = String(allDayRows.length);
+    if ($("kpiLogEventsSub")) $("kpiLogEventsSub").textContent = `${inCount} IN · ${outCount} OUT`;
+
+    // Render shift summary cards
+    if ($("logShiftsBody")) {
+      if ($("logShiftsSummary")) $("logShiftsSummary").textContent = `${shifts.length} staff active · ${onSiteList.length} currently on-site`;
+      $("logShiftsBody").innerHTML = shifts.map(s => `
+        <div class="shiftCard">
+          <div class="shiftCardTop">
+            <span>${esc(s.name)}</span>
+            <span class="tag ${s.onSite ? "in" : "out"}">${s.onSite ? "ON-SITE" : "OUT"}</span>
+          </div>
+          <div class="shiftTimes">First IN: ${s.firstIn ? fmtTime(s.firstIn) : "—"} · Last OUT: ${s.lastOut ? fmtTime(s.lastOut) : (s.onSite ? "Active" : "—")}</div>
+          <div class="shiftDur">${s.totalMs > 0 ? `Completed shift: ${fmtDur(s.totalMs)}` : (s.onSite && s.firstIn ? `Clocked in at ${fmtTime(s.firstIn)}` : `${s.eventsCount} event(s)`)}</div>
+        </div>
+      `).join("") || `<div class="muted">No shift activity recorded on ${day}.</div>`;
+    }
+
+    // Filter rows for table if user searched/filtered
+    const q = ($("logSearch") ? $("logSearch").value : "").trim().toLowerCase();
+    let rows = allDayRows.filter(p => !q || (p.staffName || "").toLowerCase().includes(q));
+    if (state.logFilter === "in") rows = rows.filter(p => p.direction === "in");
+    else if (state.logFilter === "out") rows = rows.filter(p => p.direction === "out");
+    else if (state.logFilter === "unsynced") rows = rows.filter(p => !p.synced);
+
     const tb = $("logTable").querySelector("tbody");
-    tb.innerHTML = rows.map(p => `<tr data-id="${p.id}"><td>${p.snapshot ? `<img src="${p.snapshot}" alt="">` : ""}</td><td>${esc(p.staffName)}</td><td>${fmtTime(p.ts)}</td><td><span class="tag ${p.direction}">${p.direction.toUpperCase()}</span></td><td>${p.method}${p.confidence != null ? ` <small class="muted">${p.confidence}</small>` : ""}${p.note ? ` <span class="tag ${/weak/.test(p.note) ? "warn" : ""}">${esc(p.note)}</span>` : ""}</td><td><span class="tag ${p.synced ? "ok" : "pending"}">${p.synced ? "synced" : "pending"}</span></td><td><button class="btn small" data-flip="${p.id}">Flip</button> ${p.synced ? "" : `<button class="btn small danger" data-del="${p.id}">Delete</button>`}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">No punches on ${day}.</td></tr>`;
+    tb.innerHTML = rows.map(p => `<tr data-id="${p.id}"><td>${p.snapshot ? `<img src="${p.snapshot}" alt="" data-snap="${p.id}">` : ""}</td><td><b>${esc(p.staffName)}</b></td><td>${fmtTime(p.ts)}</td><td><span class="tag ${p.direction}">${p.direction.toUpperCase()}</span></td><td>${p.method}${p.confidence != null ? ` <small class="muted">${p.confidence}</small>` : ""}${p.note ? ` <span class="tag ${/weak/.test(p.note) ? "warn" : ""}">${esc(p.note)}</span>` : ""}</td><td><span class="tag ${p.synced ? "ok" : "pending"}">${p.synced ? "synced" : "pending"}</span></td><td><button class="btn small" data-flip="${p.id}">Flip</button> ${p.synced ? "" : `<button class="btn small danger" data-del="${p.id}">Delete</button>`}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">No punches on ${day}.</td></tr>`;
+
+    tb.querySelectorAll("img[data-snap]").forEach(img => img.addEventListener("click", () => {
+      const p = allDayRows.find(x => x.id === img.dataset.snap);
+      if (!p || !$("photoModal")) return;
+      $("photoModalImg").src = p.snapshot;
+      $("photoModalMeta").textContent = `${p.staffName} · Clocked ${p.direction.toUpperCase()} at ${fmtTime(p.ts)} (${p.day}) · via ${p.method}${p.confidence != null ? ` (dist ${p.confidence})` : ""}`;
+      $("photoModal").classList.add("open");
+    }));
     tb.querySelectorAll("button[data-flip]").forEach(b => b.addEventListener("click", async () => {
-      const p = await DBX.getPunch(b.dataset.flip); p.direction = p.direction === "in" ? "out" : "in"; p.synced = 0; await DBX.savePunch(p); renderLog(); updateSyncDot();
+      const p = await DBX.getPunch(b.dataset.flip); p.direction = p.direction === "in" ? "out" : "in"; p.synced = 0; await DBX.savePunch(p); renderLog(); updateSyncDot(); updateKioskHud();
     }));
     tb.querySelectorAll("button[data-del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("Delete this punch?")) return;
-      await DBX.deletePunch(b.dataset.del); renderLog(); updateSyncDot();
+      await DBX.deletePunch(b.dataset.del); renderLog(); updateSyncDot(); updateKioskHud();
     }));
     const n = await DBX.unsyncedCount();
     const l = Sync.last;
+    if ($("kpiLogSync")) $("kpiLogSync").textContent = n ? `${n} Pending` : "Synced";
     $("logInfo").textContent = `${n} pending · ${l.at ? `last sync ${l.at.toLocaleTimeString()}: ${l.msg}` : "never synced"}`;
   }
+
   $("logDay").addEventListener("change", renderLog);
+  function shiftLogDay(deltaDays) {
+    const cur = $("logDay").value || nowLocal().day;
+    const d = new Date(cur + "T12:00:00");
+    d.setDate(d.getDate() + deltaDays);
+    $("logDay").value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    renderLog();
+  }
+  if ($("logPrev")) $("logPrev").addEventListener("click", () => shiftLogDay(-1));
+  if ($("logNext")) $("logNext").addEventListener("click", () => shiftLogDay(1));
+  if ($("logToday")) $("logToday").addEventListener("click", () => { $("logDay").value = nowLocal().day; renderLog(); });
+  if ($("logSearch")) $("logSearch").addEventListener("input", renderLog);
+  document.querySelectorAll("#logFilter .chip").forEach(btn => btn.addEventListener("click", () => {
+    state.logFilter = btn.dataset.lf;
+    document.querySelectorAll("#logFilter .chip").forEach(c => c.classList.toggle("on", c === btn));
+    renderLog();
+  }));
+  if ($("logShiftsToggle")) {
+    $("logShiftsToggle").addEventListener("click", () => {
+      const p = $("logShiftsPanel");
+      if (!p) return;
+      p.hidden = !p.hidden;
+      $("logShiftsToggle").classList.toggle("primary", !p.hidden);
+    });
+  }
+  if ($("logExport")) {
+    $("logExport").addEventListener("click", async () => {
+      const day = $("logDay").value || nowLocal().day;
+      const rows = (await DBX.punchesForDay(day)).sort((a, b) => a.ts.localeCompare(b.ts));
+      if (!rows.length) { toast("No punches on " + day + " to export", true); return; }
+      const qCsv = v => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+      const csv = [
+        ["Date", "Time", "Staff Name", "Direction", "Method", "Match Distance", "Synced", "Notes"].join(","),
+        ...rows.map(p => [p.day, fmtTime(p.ts), qCsv(p.staffName), p.direction.toUpperCase(), p.method, p.confidence ?? "", p.synced ? "Yes" : "No", qCsv(p.note)].join(",")),
+      ].join("\r\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `attendance-${state.site.toLowerCase()}-${day}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Exported ${rows.length} events for ${day}`);
+    });
+  }
+  if ($("photoModalClose")) $("photoModalClose").addEventListener("click", () => $("photoModal").classList.remove("open"));
+  if ($("photoModal")) $("photoModal").addEventListener("click", e => { if (e.target === $("photoModal")) $("photoModal").classList.remove("open"); });
+
   $("logSync").addEventListener("click", async () => { await Sync.run("manual"); renderLog(); });
   $("logManual").addEventListener("click", () => { state.manualStaff = null; $("mnIn").disabled = $("mnOut").disabled = true; renderManualList(""); $("manual").classList.add("open"); });
   function renderManualList(q) {
@@ -677,6 +1075,7 @@
     $("setDevice").value = await DBX.getMeta("device", "");
     $("setThreshold").value = state.threshold;
     $("setLive").checked = state.liveness;
+    if ($("setSound")) $("setSound").checked = state.sound;
     const pending = await DBX.unsyncedCount();
     const l = Sync.last;
     $("setInfo").textContent = [
@@ -696,6 +1095,7 @@
     const t = parseFloat($("setThreshold").value);
     await DBX.setMeta("threshold", (t > 0.2 && t < 0.8) ? String(t) : "");
     await DBX.setMeta("liveness", $("setLive").checked);
+    if ($("setSound")) await DBX.setMeta("sound", $("setSound").checked);
     await loadData(); renderSettings(); toast("Settings saved");
     if (siteChanged) autoRoster(true);   // a new site = a new roster
   });
@@ -740,13 +1140,27 @@
     const n = await DBX.unsyncedCount();
     const l = Sync.last;
     const d = $("syncDot");
-    d.className = "syncDot " + (n ? (l.ok === false ? "bad" : "pending") : (l.ok === false ? "bad" : "ok"));
+    const status = n ? (l.ok === false ? "bad" : "pending") : (l.ok === false ? "bad" : "ok");
+    d.className = "syncDot " + status;
     d.title = `${n} pending · ${l.msg || ""}`;
+    if ($("syncLabel")) {
+      $("syncLabel").textContent = !navigator.onLine ? (n ? `Offline (${n})` : "Offline") : (n ? `${n} Pending` : (l.ok === false ? "Sync Err" : "Synced"));
+    }
+    if ($("tabLogBadge")) {
+      $("tabLogBadge").textContent = String(n);
+      $("tabLogBadge").hidden = n === 0;
+    }
   }
+  if ($("syncPill")) $("syncPill").addEventListener("click", async () => { toast("Syncing with server…"); const r = await Sync.run("manual"); toast(r.msg, r.ok === false); });
   Sync.onChange(() => { updateSyncDot(); if (state.mgrOpen) renderSettings(); });
 
   // ---------- boot ----------
-  function tickClock() { $("clock").textContent = nowLocal().hhmm; }
+  function tickClock() {
+    const n = nowLocal();
+    $("clock").textContent = n.hhmm;
+    if ($("clockSec")) $("clockSec").textContent = n.sec;
+    if ($("clockDate")) $("clockDate").textContent = n.dateStr;
+  }
   async function migrate() {
     // v0.1 stored the manager PIN in clear; hash it once.
     const plain = await DBX.getMeta("mgrPin", "");
@@ -754,7 +1168,7 @@
     else if (plain) await DBX.delMeta("mgrPin");
   }
   async function boot() {
-    tickClock(); setInterval(tickClock, 15000);
+    tickClock(); setInterval(tickClock, 1000);
     await migrate();
     await loadData();
     updateSyncDot();
