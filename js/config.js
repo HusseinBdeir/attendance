@@ -5,7 +5,7 @@
 // (generated per site by scripts/att03_endpoints.py, gitignored).
 
 const ATT_CONFIG = {
-  version: "0.3.0",
+  version: "0.3.1",
 
   // Site code -> business-unit display name in Dataverse (exact, the API filters on it).
   sites: {

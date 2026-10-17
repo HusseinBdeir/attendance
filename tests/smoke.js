@@ -79,7 +79,7 @@ async function waitFor(page, fn, arg, timeout) {
 
   console.log("3. descriptors from sample photo");
   const faces = await page.evaluate(async () => {
-    const img = new Image(); img.src = "/tests/faces/sample1.jpg"; await img.decode();
+    const img = new Image(); img.src = "tests/faces/sample1.jpg"; await img.decode();
     window.__img = img;
     const r = await ATT_TEST.descriptorsFromImage(img);
     return r.map(x => ({ box: { x: x.box.x, y: x.box.y, width: x.box.width, height: x.box.height } }));
@@ -88,7 +88,7 @@ async function waitFor(page, fn, arg, timeout) {
   check("at least 2 faces in the sample photo", faces.length >= 2, faces.length);
   // crop helper lives in the page: crop(faceIdx, pad, mirror, scale) -> canvas (re-installed after reloads)
   const installCrop = () => page.evaluate(async boxes => {
-    if (!window.__img) { const img = new Image(); img.src = "/tests/faces/sample1.jpg"; await img.decode(); window.__img = img; }
+    if (!window.__img) { const img = new Image(); img.src = "tests/faces/sample1.jpg"; await img.decode(); window.__img = img; }
     window.__crop = (i, pad, mirror, scale) => {
       const b = boxes[i].box; const img = window.__img;
       const px = b.width * pad, py = b.height * pad;
@@ -195,7 +195,7 @@ async function waitFor(page, fn, arg, timeout) {
   console.log("7. unknown face (face 1) -> PIN hint, no punch");
   // the unknown person comes from a second photo; try pads until the detector sees the face
   const unk = await page.evaluate(async () => {
-    const img = new Image(); img.src = "/tests/faces/sample2.jpg"; await img.decode();
+    const img = new Image(); img.src = "tests/faces/sample2.jpg"; await img.decode();
     const all = await ATT_TEST.face.detectAll(img);
     if (!all.length) return { found: false };
     const faces = (await ATT_TEST.db.allFaces()).filter(f => f.d.length === 128);

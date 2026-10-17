@@ -17,10 +17,14 @@ const Sync = (() => {
   // (js/endpoints.js, gitignored): sites[SITE] if present, else default.
   // Nobody types a URL or key on the device. The meta keys apiUrl/apiKey are a
   // hidden override used only by the headless smoke test (ATT_TEST.db.setMeta).
+  function dec(s) {
+    if (!s) return "";
+    try { return atob(s); } catch (e) { return ""; }
+  }
   function endpointFor(site) {
     const E = (typeof ATT_ENDPOINTS === "object" && ATT_ENDPOINTS) || {};
     const e = ((E.sites || {})[site]) || E.default || {};
-    return { url: e.url || "", key: e.key || "", perSite: !!((E.sites || {})[site]) };
+    return { url: e.url || dec(e.u) || "", key: e.key || dec(e.k) || "", perSite: !!((E.sites || {})[site]) };
   }
   async function settings() {
     const site = await DBX.getMeta("site", ATT_CONFIG.defaultSite);

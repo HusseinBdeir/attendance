@@ -2,4 +2,3 @@ exports/
 .env
 node_modules/
 tests/out/
-js/endpoints.js
