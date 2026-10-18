@@ -302,11 +302,11 @@
   async function updateKioskHud() {
     try {
       const todayRows = (await DBX.punchesForDay(nowLocal().day)).filter(p => !p.void);
-      todayRows.sort((a, b) => a.ts.localeCompare(b.ts));
       const latestByStaff = new Map();
-      todayRows.forEach(p => latestByStaff.set(p.staffId, p));
+      (await recentPunches()).forEach(p => latestByStaff.set(p.staffId, p));
       let onSite = 0;
-      latestByStaff.forEach(p => { if (p.direction === "in") onSite++; });
+      const win = C.punch.shiftMaxHours * 3600000;
+      latestByStaff.forEach(p => { if (p.direction === "in" && Date.now() - new Date(p.ts).getTime() <= win) onSite++; });
       if ($("onSiteCount")) $("onSiteCount").textContent = `${onSite} on-site`;
 
       const enrolledPersons = new Set(usableFaces().map(f => f.staffId)).size;
@@ -325,17 +325,29 @@
   }
 
   // ---------- punching ----------
-  async function lastPunchToday(staffId) {
-    const rows = (await DBX.punchesForDay(nowLocal().day)).filter(p => p.staffId === staffId && !p.void);
+  // Yesterday + today, oldest first: a night shift clocks IN before midnight and OUT after it.
+  async function recentPunches() {
+    const n = nowLocal();
+    const y = new Date(); y.setDate(y.getDate() - 1);
+    const yday = `${y.getFullYear()}-${pad(y.getMonth() + 1)}-${pad(y.getDate())}`;
+    const rows = (await DBX.punchesForDays([yday, n.day])).filter(p => !p.void);
     rows.sort((a, b) => a.ts.localeCompare(b.ts));
-    return rows[rows.length - 1] || null;
+    return rows;
+  }
+  // The person's last punch if it is recent enough to still belong to the same shift
+  // (C.punch.shiftMaxHours); older punches do not flip the direction — a new day starts with IN.
+  async function lastPunchRecent(staffId) {
+    const rows = (await recentPunches()).filter(p => p.staffId === staffId);
+    const last = rows[rows.length - 1] || null;
+    if (!last) return null;
+    return (Date.now() - new Date(last.ts).getTime()) <= C.punch.shiftMaxHours * 3600000 ? last : null;
   }
 
   async function punch(staffId, method, confidence, src, forcedDirection, note) {
     const st = state.staff.get(staffId);
     if (!st) { toast("Unknown staff id", true); return null; }
     const n = nowLocal();
-    const last = await lastPunchToday(staffId);
+    const last = await lastPunchRecent(staffId);
     if (!forcedDirection && last && (Date.now() - new Date(last.ts).getTime()) < C.punch.debounceMinutes * 60000) {
       showCard(st, last, true);
       return null;
@@ -344,7 +356,7 @@
     const p = {
       id: uuid(), staffId, staffName: st.name, ts: n.ts, day: n.day, tzOffsetMin: n.tzOffsetMin,
       direction, method, confidence: confidence == null ? null : r3(confidence),
-      snapshot: src ? snapshot(src) : "", site: state.site, synced: 0, note: note || "",
+      snapshot: src ? snapshot(src) : "", site: state.site, synced: 0, rev: 0, note: note || "",
     };
     await DBX.savePunch(p);
     state.lastPunchAt.set(staffId, Date.now());
@@ -401,7 +413,7 @@
   $("cardFlip").addEventListener("click", async () => {
     const p = state.cardPunch; if (!p) return;
     p.direction = p.direction === "in" ? "out" : "in";
-    p.synced = 0;                       // re-push: the server upserts on id
+    p.synced = 0; p.rev = (p.rev || 0) + 1;   // re-push: the server upserts on id; rev guards an in-flight push
     await DBX.savePunch(p);
     showCard(state.staff.get(p.staffId), p, false);
     updateSyncDot();
@@ -410,21 +422,31 @@
   });
 
   // ---------- kiosk loop ----------
+  const streamAlive = () => !!(state.stream && state.stream.getVideoTracks().some(t => t.readyState === "live"));
   async function startCamera() {
-    if (state.stream) return;
+    if (streamAlive()) return;
+    if (state.stream) { try { state.stream.getTracks().forEach(t => t.stop()); } catch (e) { /* ignore */ } state.stream = null; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { hint("Camera needs HTTPS (or localhost) — open the https:// address", true); return; }
     try {
       state.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      // phones end the track when the app is backgrounded or the screen locks: restart when it comes back
+      state.stream.getVideoTracks().forEach(t => t.addEventListener("ended", () => { if (document.visibilityState === "visible") setTimeout(() => startCamera().catch(() => {}), 800); }));
       $("video").srcObject = state.stream;
       $("enVideo").srcObject = state.stream;
       await new Promise(r => { $("video").onloadedmetadata = r; setTimeout(r, 1500); });
+      $("video").play().catch(() => {});
     } catch (e) {
       hint("Camera unavailable: " + (e.message || e), true);
     }
   }
+  function resumeCamera() {
+    if (!streamAlive()) { startCamera().catch(() => {}); return; }
+    const v = $("video"); if (v.paused) v.play().catch(() => {});
+  }
   async function keepAwake() {
     try { if ("wakeLock" in navigator && !state.wake) { state.wake = await navigator.wakeLock.request("screen"); state.wake.addEventListener("release", () => { state.wake = null; }); } } catch (e) { /* not granted */ }
   }
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") keepAwake(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { keepAwake(); if (state.running) resumeCamera(); } });
 
   function resetStreak() { state.streak = { staffId: null, n: 0, dist: [] }; setStreakProgress(0); }
 
@@ -690,6 +712,7 @@
     $("enPinState").textContent = st.pinhash ? "PIN already set (Set PIN replaces it)" : "no PIN";
     renderEnrolList($("enSearch").value);
     renderSamples();
+    if (window.innerWidth <= 860 && !navigator.webdriver) { const stu = document.querySelector(".enrolStudio"); if (stu && stu.scrollIntoView) stu.scrollIntoView({ behavior: "smooth", block: "start" }); }
   }
   function renderSamples() {
     const s = state.enrol.samples;
@@ -988,7 +1011,7 @@
       $("photoModal").classList.add("open");
     }));
     tb.querySelectorAll("button[data-flip]").forEach(b => b.addEventListener("click", async () => {
-      const p = await DBX.getPunch(b.dataset.flip); p.direction = p.direction === "in" ? "out" : "in"; p.synced = 0; await DBX.savePunch(p); renderLog(); updateSyncDot(); updateKioskHud();
+      const p = await DBX.getPunch(b.dataset.flip); if (!p) return; p.direction = p.direction === "in" ? "out" : "in"; p.synced = 0; p.rev = (p.rev || 0) + 1; await DBX.savePunch(p); renderLog(); updateSyncDot(); updateKioskHud(); Sync.run("flip").catch(() => {});
     }));
     tb.querySelectorAll("button[data-del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("Delete this punch?")) return;
@@ -1210,7 +1233,7 @@
     setLiveMock: fn => { state.liveMock = fn; },
     calibration: calibrationReport,
     keypad: Keypad,
-    punch, hideCard, loadData, openManager, closeManager,
+    punch, hideCard, loadData, openManager, closeManager, lastPunchRecent, recentPunches, startCamera, streamAlive,
     db: DBX, sync: Sync, face: Face,
   };
 

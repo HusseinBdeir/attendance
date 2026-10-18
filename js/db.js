@@ -64,6 +64,7 @@ const DBX = {
   getPunch(id) { return tx("punches", "readonly", s => s.get(id)); },
   deletePunch(id) { return tx("punches", "readwrite", s => s.delete(id)); },
   punchesForDay(day) { return cursorAll("punches", "day", IDBKeyRange.only(day)); },
+  punchesForDays(days) { return Promise.all(days.map(d => cursorAll("punches", "day", IDBKeyRange.only(d)))).then(a => [].concat(...a)); },
   unsyncedPunches(limit) {
     return cursorAll("punches", "synced", IDBKeyRange.only(0))
       .then(rows => rows.sort((a, b) => a.ts.localeCompare(b.ts)).slice(0, limit || 1e9));
@@ -75,13 +76,19 @@ const DBX = {
       r.onerror = () => reject(r.error);
     }));
   },
-  markPunchesSynced(ids) {
+  // revs = {id: rev} as sent; a row edited (flipped) while the request was in
+  // flight carries a newer rev and stays unsynced so the edit is pushed next run.
+  markPunchesSynced(ids, revs) {
     return openDB().then(db => new Promise((resolve, reject) => {
       const t = db.transaction("punches", "readwrite");
       const s = t.objectStore("punches");
       ids.forEach(id => {
         const g = s.get(id);
-        g.onsuccess = () => { if (g.result) { g.result.synced = 1; s.put(g.result); } };
+        g.onsuccess = () => {
+          const r = g.result; if (!r) return;
+          if (revs && (r.rev || 0) !== (revs[id] || 0)) return;
+          r.synced = 1; s.put(r);
+        };
       });
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
@@ -123,7 +130,9 @@ const DBX = {
         const old = new Map(all.result.map(x => [x.id, x]));
         list.forEach(x => {
           const prev = old.get(x.id) || {};
-          s.put(Object.assign({}, prev, x, { active: true }));
+          // never let an absent server field (pinhash: undefined) erase a local value
+          const clean = {}; Object.keys(x).forEach(k => { if (x[k] !== undefined) clean[k] = x[k]; });
+          s.put(Object.assign({}, prev, clean, { active: true }));
         });
         all.result.forEach(x => { if (!keep.has(x.id)) { x.active = false; s.put(x); } });
       };

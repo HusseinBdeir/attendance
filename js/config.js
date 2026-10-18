@@ -5,7 +5,7 @@
 // (generated per site by scripts/att03_endpoints.py, gitignored).
 
 const ATT_CONFIG = {
-  version: "0.3.1",
+  version: "0.3.2",
 
   // Site code -> business-unit display name in Dataverse (exact, the API filters on it).
   sites: {
@@ -80,6 +80,7 @@ const ATT_CONFIG = {
 
   punch: {
     debounceMinutes: 2,   // same person again within N minutes = "already clocked"
+    shiftMaxHours: 16,    // IN/OUT toggles from the last punch within this window, across midnight (night shifts); older = a fresh IN
     cardSeconds: 4,       // how long the confirmation card stays up
     snapshotWidth: 240,   // audit snapshot saved with every punch (JPEG)
     snapshotQuality: 0.6,

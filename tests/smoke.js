@@ -31,15 +31,16 @@ async function waitFor(page, fn, arg, timeout) {
   const ctx = await browser.newContext({ permissions: ["camera"], viewport: { width: 1280, height: 800 } });
 
   // ---- mock API (what the Power Automate flow will do) ----
-  const server = { punches: new Map(), faces: new Map(), calls: [] };
+  const server = { punches: new Map(), faces: new Map(), calls: [], delayMs: 0 };
   const roster = [
     { id: "11111111-1111-1111-1111-111111111111", name: "Alice A", officialName: "Alice Abbas" },
     { id: "22222222-2222-2222-2222-222222222222", name: "Bilal B", officialName: "Bilal Baz" },
     { id: "33333333-3333-3333-3333-333333333333", name: "Carla C", officialName: "" },
   ];
-  await ctx.route("**/fakeapi", route => {
+  await ctx.route("**/fakeapi", async route => {
     const body = JSON.parse(route.request().postData() || "{}");
     server.calls.push(body.op);
+    if (server.delayMs) await sleep(server.delayMs);
     if (body.key !== "k") return route.fulfill({ status: 401, body: "bad key" });
     if (body.op === "roster") {
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, staff: roster, faces: body.restore ? [...server.faces.values()] : [] }) });
@@ -381,6 +382,85 @@ async function waitFor(page, fn, arg, timeout) {
   check("shift pairing panel opens and shows 2 shift cards",
     await page.evaluate(() => !document.getElementById("logShiftsPanel").hidden) &&
     (await page.$$eval("#logShiftsBody .shiftCard", r => r.length)) === 2);
+
+  console.log("18. v0.3.2 edge cases: PIN survives roster refresh, night shift, in-flight flip, phone layout");
+  const ALICE = "11111111-1111-1111-1111-111111111111", BILAL = "22222222-2222-2222-2222-222222222222", CARLA = "33333333-3333-3333-3333-333333333333";
+  const pinBefore = await page.evaluate(async id => (await ATT_TEST.db.getStaff(id)).pinhash, BILAL);
+  await page.evaluate(async () => { await ATT_TEST.sync.roster(false); await ATT_TEST.loadData(); });
+  const pinAfter = await page.evaluate(async id => (await ATT_TEST.db.getStaff(id)).pinhash, BILAL);
+  check("staff PIN survives a plain roster refresh (server sends no pinhash)", pinBefore && pinBefore.length === 64 && pinAfter === pinBefore, { pinBefore, pinAfter });
+
+  // night shift: Carla clocked IN "yesterday" 3 h ago -> the next punch must be OUT; a 20 h old IN no longer counts
+  const night = await page.evaluate(async id => {
+    const pad = n => String(n).padStart(2, "0");
+    const y = new Date(); y.setDate(y.getDate() - 1);
+    const yday = `${y.getFullYear()}-${pad(y.getMonth() + 1)}-${pad(y.getDate())}`;
+    const row = { id: "aaaaaaaa-0000-4000-8000-00000000a001", staffId: id, staffName: "Carla C", ts: new Date(Date.now() - 3 * 3600000).toISOString(), day: yday, tzOffsetMin: 0, direction: "in", method: "manual", confidence: null, snapshot: "", site: "LAUNA", synced: 1, rev: 0, note: "" };
+    await ATT_TEST.db.savePunch(row);
+    const last = await ATT_TEST.lastPunchRecent(id);
+    const p = await ATT_TEST.punch(id, "manual", null, null, null, "night test");
+    ATT_TEST.hideCard();
+    row.ts = new Date(Date.now() - 20 * 3600000).toISOString(); await ATT_TEST.db.savePunch(row);
+    if (p) await ATT_TEST.db.deletePunch(p.id);
+    const stale = await ATT_TEST.lastPunchRecent(id);
+    await ATT_TEST.db.deletePunch(row.id);
+    return { lastDir: last && last.direction, newDir: p && p.direction, stale };
+  }, CARLA);
+  check("IN before midnight -> next punch after midnight is OUT", night.lastDir === "in" && night.newDir === "out", night);
+  check("a 20 h old IN no longer flips the direction", night.stale === null, night);
+
+  // in-flight flip: the server answers slowly; the user flips the card while the first push is on the wire
+  server.delayMs = 1500;
+  await page.evaluate(() => ATT_TEST.closeManager());
+  const raceId = await page.evaluate(async id => { const p = await ATT_TEST.punch(id, "manual", null, null, "in", "race"); return p && p.id; }, ALICE);
+  await sleep(400);
+  await page.evaluate(() => document.getElementById("cardFlip").click());
+  await waitFor(page, async id => { const p = await ATT_TEST.db.getPunch(id); return p && p.synced === 1 && !ATT_TEST.sync.running; }, raceId, 15000);
+  await sleep(300);
+  const raceLocal = await page.evaluate(async id => ATT_TEST.db.getPunch(id), raceId);
+  const raceServer = server.punches.get(raceId);
+  check("flip during an in-flight push: local row synced only after the OUT reached the server", raceLocal.direction === "out" && raceLocal.rev === 1 && raceLocal.synced === 1 && raceServer && raceServer.direction === "out", { local: raceLocal.direction, rev: raceLocal.rev, server: raceServer && raceServer.direction });
+  server.delayMs = 0;
+  await page.evaluate(() => ATT_TEST.hideCard());
+
+  // phone layout (portrait 390x844 and landscape 844x390), no reload needed
+  await page.setViewportSize({ width: 390, height: 844 });
+  await sleep(300);
+  const portrait = await page.evaluate(() => {
+    const r = s => document.querySelector(s).getBoundingClientRect();
+    const W = innerWidth;
+    const hud = r("#kiosk .kioskTopRight"), left = r("#kiosk .kioskTopLeft"), bar = r(".bar");
+    return { W, hudRight: Math.round(hud.right), hudOverlap: hud.left < left.right && hud.top < left.bottom, barRight: Math.round(bar.right), hint: Math.round(r("#hint").right) };
+  });
+  check("portrait phone: clock/sync HUD stays inside the screen", portrait.hudRight <= portrait.W && !portrait.hudOverlap, portrait);
+  await page.evaluate(() => ATT_TEST.openManager());
+  await sleep(300);
+  const tabs = await page.$$eval(".tab", els => els.map(e => { const r = e.getBoundingClientRect(); return { t: e.dataset.tab, l: Math.round(r.left), r: Math.round(r.right), h: Math.round(r.height) }; }));
+  check("portrait phone: all four manager tabs reachable on screen", tabs.length === 4 && tabs.every(t => t.l >= 0 && t.r <= 390 && t.h >= 30), tabs);
+  await page.evaluate(() => document.querySelector('.tab[data-tab="log"]').click());
+  await sleep(200);
+  const tbl = await page.evaluate(() => { const c = document.querySelector("#tab-log .tableCard"); return { ox: getComputedStyle(c).overflowX, cw: c.clientWidth, sw: c.scrollWidth, right: Math.round(c.getBoundingClientRect().right) }; });
+  check("portrait phone: log table scrolls sideways inside the viewport instead of clipping", tbl.ox === "auto" && tbl.right <= 390 && tbl.sw >= tbl.cw, tbl);
+  await page.evaluate(() => ATT_TEST.closeManager());
+  await page.setViewportSize({ width: 844, height: 390 });
+  await sleep(300);
+  await page.click("#btnPin");
+  await sleep(200);
+  const kp = await page.evaluate(() => { const r = document.querySelector(".kpGrid").getBoundingClientRect(); return { bottom: Math.round(r.bottom), H: innerHeight }; });
+  check("landscape phone: whole keypad visible without scrolling", kp.bottom <= kp.H, kp);
+  await page.click('#keypad [data-k="x"]');
+  await page.evaluate(async id => { await ATT_TEST.punch(id, "manual", null, null, "in", "layout"); }, BILAL);
+  await sleep(300);
+  const cardGeom = await page.evaluate(() => {
+    const c = document.getElementById("card").getBoundingClientRect(), hud = document.querySelector("#kiosk .kioskTopRight").getBoundingClientRect(), bar = document.querySelector(".bar").getBoundingClientRect();
+    const inter = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+    return { hud: inter(c, hud), bar: inter(c, bar), hintOpacity: getComputedStyle(document.querySelector(".hintWrap")).opacity, top: Math.round(c.top), bottom: Math.round(c.bottom) };
+  });
+  check("landscape phone: confirmation card clears the HUD and the dock, hint hidden under it", !cardGeom.hud && !cardGeom.bar && cardGeom.hintOpacity === "0", cardGeom);
+  await page.evaluate(() => ATT_TEST.hideCard());
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const alive = await page.evaluate(() => ATT_TEST.streamAlive());
+  check("camera stream reported alive after viewport changes", alive === true);
 
   check("no page errors", errors.length === 0, errors);
   console.log(`\n${pass} passed, ${fail} failed`);

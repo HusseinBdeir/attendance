@@ -72,7 +72,8 @@ const Sync = (() => {
     });
     const okP = (res.punches || []).filter(id => punches.some(p => p.id === id));
     const okF = (res.faces || []).filter(id => faces.some(f => f.id === id));
-    if (okP.length) await DBX.markPunchesSynced(okP);
+    const revs = {}; punches.forEach(p => { revs[p.id] = p.rev || 0; });
+    if (okP.length) await DBX.markPunchesSynced(okP, revs);
     if (okF.length) await DBX.markFacesSynced(okF);
     if (okP.length < punches.length || okF.length < faces.length) {
       throw new Error(`server accepted ${okP.length}/${punches.length} punches, ${okF.length}/${faces.length} faces`);
@@ -80,10 +81,11 @@ const Sync = (() => {
     return { punches: okP.length, faces: okF.length };
   }
 
+  let queued = false;   // a run asked for while one is in flight (e.g. a flip) runs again afterwards
   async function run(reason) {
-    if (running) return last;
+    if (running) { queued = true; return last; }
     if (!navigator.onLine) { last = { at: new Date(), ok: null, msg: "offline" }; emit(); return last; }
-    running = true;
+    running = true; queued = false;
     let total = { punches: 0, faces: 0 };
     try {
       for (let i = 0; i < 50; i++) {            // drain in batches
@@ -98,13 +100,15 @@ const Sync = (() => {
       running = false;
       emit();
     }
+    if (queued) { queued = false; return run(reason ? reason + "+queued" : "queued"); }
     return last;
   }
 
   // Pull the site's roster (+ server-held enrolments when restore=true).
   async function roster(restore) {
     const res = await post({ op: "roster", restore: !!restore });
-    const staff = (res.staff || []).map(s => ({ id: s.id, name: s.name, officialName: s.officialName || "", pinhash: s.pinhash || undefined }));
+    // the roster op carries no pinhash (PINs ride on enrolment rows): only set the key when the server sends one
+    const staff = (res.staff || []).filter(s => s && s.id).map(s => Object.assign({ id: s.id, name: s.name || "?", officialName: s.officialName || "" }, s.pinhash ? { pinhash: s.pinhash } : {}));
     await DBX.replaceStaff(staff);
     let restored = 0;
     if (restore && Array.isArray(res.faces)) {

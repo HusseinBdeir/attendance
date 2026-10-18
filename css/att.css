@@ -1368,3 +1368,81 @@ input:focus, select:focus {
   .cardName { font-size: 24px; }
   .cardLine { font-size: 18px; }
 }
+
+/* ==================== v0.3.2 PHONE / SMALL SCREENS ==================== */
+/* notch phones: keep the HUD and the dock out of the safe areas */
+.kioskTop { top: calc(16px + env(safe-area-inset-top, 0px)); }
+.bar { padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+.sitePill, .onSitePill, .syncPill { white-space: nowrap; }
+.pinCta span { white-space: nowrap; }
+
+@media (max-width: 720px) {
+  .kioskTop { left: 12px; right: 12px; flex-wrap: wrap; gap: 8px; justify-content: flex-start; }
+  .kioskTopLeft, .kioskTopRight { gap: 6px; }
+  .kioskTopRight { margin-left: auto; }
+  .sitePill { padding: 6px 12px; gap: 8px; }
+  .siteName { font-size: 15px; }
+  .deviceTag { display: none; }
+  .onSitePill, .syncPill { padding: 6px 10px; font-size: 12px; }
+  .syncLabel { font-size: 12px; }
+  .clockBox { padding: 4px 10px; border-radius: 12px; }
+  .clock { font-size: 17px; }
+  .clockSec { font-size: 11px; }
+  .clockDate { display: none; }
+  .hint { white-space: normal; text-align: center; max-width: 92vw; font-size: 16px; padding: 9px 16px; }
+  .bar { padding-left: 12px; padding-right: 12px; gap: 10px; }
+  .biometricBadge { font-size: 12px; gap: 6px; }
+  .btn.big { font-size: 16px; padding: 10px 16px; }
+  .kpiGrid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .kpiVal { font-size: 22px; }
+  .panel { padding: 12px; }
+  .toolbarSearch { width: 100% !important; }
+  .toolbarLeft, .toolbarRight { width: 100%; }
+}
+
+/* manager header: the tab bar gets its own row, tables scroll sideways instead of clipping */
+@media (max-width: 860px) {
+  .mgrHead { flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
+  .mgrHead .brand { display: none; }
+  .tabs { order: 3; width: 100%; margin-left: 0; }
+  .tab { flex: 1; justify-content: center; padding: 9px 4px; font-size: 13px; gap: 5px; }
+  .pinBanner { padding: 8px 12px; }
+  .tableCard { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tbl { min-width: 560px; }
+  .list { max-height: 34vh; }
+}
+@media (max-width: 420px) {
+  .tab { font-size: 12px; padding: 9px 2px; }
+  .tab svg { width: 14px; height: 14px; }
+}
+
+/* short screens (phone held sideways): compact keypad, card and enrol preview */
+@media (max-height: 480px) {
+  .sheetBox { padding: 14px 18px; max-height: 96vh; }
+  .kpIcon { display: none; }
+  .kpHeader { margin-bottom: 4px; }
+  .kpTitle { font-size: 17px; }
+  .kpSub { font-size: 12px; margin-bottom: 2px; }
+  .kpDots { height: 24px; margin-bottom: 6px; gap: 12px; }
+  .kpDots i { width: 14px; height: 14px; }
+  .kpGrid { gap: 6px; }
+  .kpGrid button { font-size: 20px; padding: 7px 0; border-radius: 10px; }
+  .card { top: 50%; padding: 14px 18px 18px; gap: 14px; min-width: 0; width: min(92vw, 640px); }
+  .card img { width: 72px; height: 72px; }
+  .cardName { font-size: 22px; }
+  .cardLine { font-size: 16px; margin-top: 2px; }
+  .cardActions { margin-top: 6px; }
+  .enCam { height: 40vh; min-height: 150px; }
+}
+
+/* the guidance pill steps aside while a confirmation card is up */
+#kiosk:has(.card:not(.hidden)) .hintWrap { opacity: 0; }
+
+/* finger-sized targets on touch screens */
+@media (pointer: coarse) {
+  .chip { padding: 9px 13px; font-size: 13px; }
+  .btn.small { min-height: 40px; padding: 8px 12px; }
+  .syncPill { min-height: 40px; }
+  .hudIconBtn { width: 40px; height: 40px; }
+  .list div { padding: 12px 14px; }
+}

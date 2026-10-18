@@ -1,16 +1,16 @@
 // BHFIRMS Attendance kiosk — service worker: cache-first app shell + models,
 // so the tablet works fully offline. Bump CACHE AND the ?v= strings in
 // index.html on every deploy (they must match — see POS.md, same lesson).
-const CACHE = "bhfatt-v0.3.1";
+const CACHE = "bhfatt-v0.3.2";
 const SHELL = [
   "./",
   "./index.html",
-  "./css/att.css?v=0.3.1",
-  "./js/config.js?v=0.3.1",
-  "./js/db.js?v=0.3.1",
-  "./js/face.js?v=0.3.1",
-  "./js/sync.js?v=0.3.1",
-  "./js/app.js?v=0.3.1",
+  "./css/att.css?v=0.3.2",
+  "./js/config.js?v=0.3.2",
+  "./js/db.js?v=0.3.2",
+  "./js/face.js?v=0.3.2",
+  "./js/sync.js?v=0.3.2",
+  "./js/app.js?v=0.3.2",
   "./vendor/face-api.js",
   "./vendor/models/tiny_face_detector_model-weights_manifest.json",
   "./vendor/models/tiny_face_detector_model.bin",
