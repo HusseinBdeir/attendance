@@ -462,6 +462,33 @@ async function waitFor(page, fn, arg, timeout) {
   const alive = await page.evaluate(() => ATT_TEST.streamAlive());
   check("camera stream reported alive after viewport changes", alive === true);
 
+  // v0.3.4 Home Screen & HUD red notification count badge
+  const badgeTest = await page.evaluate(async () => {
+    await ATT_TEST.markAllAttNotifsChecked();
+    const afterClear = {
+      count: await ATT_TEST.updateAttendanceAppBadge(),
+      hidden: document.getElementById("notifCountBadge").hidden,
+    };
+    const pushedCount = await ATT_TEST.pushAttNotif({ id: "smoke-alert-1", title: "Shift Alert", body: "Late check-in review" });
+    const afterPush = {
+      count: pushedCount,
+      hidden: document.getElementById("notifCountBadge").hidden,
+      text: document.getElementById("notifCountBadge").textContent,
+      mgrHidden: document.getElementById("mgrCountBadge").hidden,
+    };
+    await ATT_TEST.markAttNotifChecked("smoke-alert-1");
+    const afterCheck = {
+      count: await ATT_TEST.updateAttendanceAppBadge(),
+      hidden: document.getElementById("notifCountBadge").hidden,
+    };
+    return { afterClear, afterPush, afterCheck };
+  });
+  check("notification count badge: shows #FF3B30 unread count on push and clears when checked",
+    badgeTest.afterClear.count === 0 && badgeTest.afterClear.hidden === true &&
+    badgeTest.afterPush.count === 1 && badgeTest.afterPush.hidden === false && badgeTest.afterPush.text === "1" && badgeTest.afterPush.mgrHidden === false &&
+    badgeTest.afterCheck.count === 0 && badgeTest.afterCheck.hidden === true,
+    badgeTest);
+
   check("no page errors", errors.length === 0, errors);
   console.log(`\n${pass} passed, ${fail} failed`);
   await browser.close();

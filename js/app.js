@@ -36,6 +36,9 @@
     manualStaff: null,
     wake: null,
     defaultPin: true,     // manager PIN still the factory default
+    notifs: [],           // custom/push notifications
+    checkedNotifs: {},    // checked notification IDs
+    lastBadgeCount: 0,
   };
 
   // ---------- helpers ----------
@@ -298,6 +301,186 @@
   }
   const staffNames = () => new Map([...state.staff.values()].map(s => [s.id, s.name]));
 
+
+  // ---------- Home Screen & Top-Right Notification Count Badge (v0.3.4) ----------
+  function loadCheckedNotifs() {
+    try {
+      const raw = localStorage.getItem("bhfatt_checked_notifs");
+      if (raw) state.checkedNotifs = JSON.parse(raw) || {};
+      const rawN = localStorage.getItem("bhfatt_custom_notifs");
+      if (rawN) state.notifs = JSON.parse(rawN) || [];
+    } catch (e) {}
+  }
+  function saveCheckedNotifs() {
+    try {
+      localStorage.setItem("bhfatt_checked_notifs", JSON.stringify(state.checkedNotifs || {}));
+      localStorage.setItem("bhfatt_custom_notifs", JSON.stringify((state.notifs || []).slice(0, 40)));
+    } catch (e) {}
+  }
+  loadCheckedNotifs();
+
+  async function computeAttendanceNotifs() {
+    const items = [];
+    const chk = state.checkedNotifs || {};
+    try {
+      const pending = await DBX.unsyncedCount();
+      const l = Sync.last || {};
+      if (pending > 0) {
+        const id = "att-sync-" + pending + (l.ok === false ? "-err" : "");
+        items.push({
+          id,
+          tag: "att-sync",
+          title: `${pending} Punch${pending === 1 ? "" : "es"} Pending Cloud Sync`,
+          body: l.ok === false ? `Last sync error: ${l.msg || "offline"}` : "Queued locally on tablet — syncs automatically when online.",
+          action: "sync",
+          ts: Date.now(),
+          checked: !!chk[id],
+        });
+      }
+      const activeStaff = [...state.staff.values()].filter(s => s.active !== false);
+      const missing = activeStaff.filter(s => sampleCount(s.id) < C.match.minSamples && !s.pinhash).length;
+      if (missing > 0) {
+        const id = "att-missing-" + missing;
+        items.push({
+          id,
+          tag: "att-missing",
+          title: `${missing} Active Staff Need Face ID or PIN`,
+          body: "Open Manager → Enrol to capture 3 Face ID poses or set a 4-digit PIN.",
+          action: "mgr",
+          ts: Date.now(),
+          checked: !!chk[id],
+        });
+      }
+      if (state.defaultPin) {
+        const id = "att-default-pin";
+        items.push({
+          id,
+          tag: "att-pin",
+          title: "Security Notice: Default Manager PIN (9999)",
+          body: "Change the factory manager PIN in Manager → Settings.",
+          action: "mgr",
+          ts: Date.now(),
+          checked: !!chk[id],
+        });
+      }
+    } catch (e) {}
+    (state.notifs || []).forEach(n => {
+      if (n && n.id) {
+        items.push(Object.assign({}, n, { checked: !!(n.checked || chk[n.id]) }));
+      }
+    });
+    return items;
+  }
+
+  async function updateAttendanceAppBadge() {
+    const items = await computeAttendanceNotifs();
+    const unread = items.filter(x => !x.checked).length;
+    state.lastBadgeCount = unread;
+    const text = unread > 99 ? "99+" : String(unread);
+    ["notifCountBadge", "mgrCountBadge"].forEach(id => {
+      const el = $(id);
+      if (el) {
+        el.hidden = unread <= 0;
+        el.textContent = text;
+      }
+    });
+    if ($("btnNotif")) {
+      $("btnNotif").title = unread > 0 ? `${unread} unread alert${unread === 1 ? "" : "s"}` : "Notifications & Kiosk Alerts";
+    }
+    try {
+      if (typeof navigator !== "undefined") {
+        if (unread > 0 && typeof navigator.setAppBadge === "function") await navigator.setAppBadge(unread).catch(() => {});
+        else if (unread <= 0 && typeof navigator.clearAppBadge === "function") await navigator.clearAppBadge().catch(() => {});
+      }
+    } catch (e) {}
+    try {
+      if (typeof navigator !== "undefined" && navigator.serviceWorker && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: "sync-unread-notifs", items });
+      }
+    } catch (e) {}
+    return unread;
+  }
+
+  async function renderNotifSheet() {
+    const sheet = $("notifSheet"), listEl = $("notifList");
+    if (!sheet || !listEl) return;
+    const items = await computeAttendanceNotifs();
+    const unread = items.filter(x => !x.checked).length;
+    if ($("notifSheetSub")) {
+      $("notifSheetSub").textContent = unread > 0
+        ? `${unread} unchecked item${unread === 1 ? "" : "s"} shown on the Home Screen badge`
+        : "All caught up — Home Screen badge is clear";
+    }
+    listEl.innerHTML = items.length ? items.map(it => `
+      <div class="notifItem${it.checked ? " checked" : ""}" data-nid="${esc(it.id)}">
+        <div style="flex:1;min-width:0">
+          <div class="notifItemTitle">${esc(it.title)}</div>
+          <div class="notifItemBody">${esc(it.body || "")}</div>
+        </div>
+        ${it.checked
+          ? `<span class="tag ok">&#10003; Checked</span>`
+          : `<button class="btn small" type="button" data-ncheck="${esc(it.id)}">&#10003; Check</button>`}
+      </div>
+    `).join("") : `<div class="muted" style="padding:12px 4px">No active alerts or notifications.</div>`;
+    listEl.querySelectorAll("button[data-ncheck]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await markAttNotifChecked(btn.dataset.ncheck);
+      });
+    });
+  }
+
+  async function markAttNotifChecked(id) {
+    if (!id) return 0;
+    state.checkedNotifs = state.checkedNotifs || {};
+    state.checkedNotifs[id] = Date.now();
+    (state.notifs || []).forEach(n => { if (n && (n.id === id || n.tag === id)) n.checked = true; });
+    saveCheckedNotifs();
+    const cnt = await updateAttendanceAppBadge();
+    if ($("notifSheet") && $("notifSheet").classList.contains("open")) await renderNotifSheet();
+    return cnt;
+  }
+
+  async function markAllAttNotifsChecked() {
+    const items = await computeAttendanceNotifs();
+    state.checkedNotifs = state.checkedNotifs || {};
+    items.forEach(it => { if (it && it.id) state.checkedNotifs[it.id] = Date.now(); });
+    (state.notifs || []).forEach(n => { if (n) n.checked = true; });
+    saveCheckedNotifs();
+    const cnt = await updateAttendanceAppBadge();
+    if ($("notifSheet") && $("notifSheet").classList.contains("open")) await renderNotifSheet();
+    return cnt;
+  }
+
+  async function pushAttNotif(item) {
+    if (!item || !item.title) return 0;
+    const id = String(item.id || item.tag || ("att-" + Date.now()));
+    if (state.checkedNotifs) delete state.checkedNotifs[id];
+    const entry = { id, tag: item.tag || id, title: String(item.title), body: String(item.body || ""), ts: Date.now(), checked: false };
+    state.notifs = (state.notifs || []).filter(x => x && x.id !== id);
+    state.notifs.unshift(entry);
+    saveCheckedNotifs();
+    const cnt = await updateAttendanceAppBadge();
+    if ($("notifSheet") && $("notifSheet").classList.contains("open")) await renderNotifSheet();
+    return cnt;
+  }
+
+  if ($("btnNotif")) {
+    $("btnNotif").addEventListener("click", async () => {
+      await renderNotifSheet();
+      $("notifSheet").classList.add("open");
+    });
+  }
+  if ($("notifCloseBtn")) $("notifCloseBtn").addEventListener("click", () => $("notifSheet").classList.remove("open"));
+  if ($("notifSheet")) $("notifSheet").addEventListener("click", e => { if (e.target === $("notifSheet")) $("notifSheet").classList.remove("open"); });
+  if ($("notifCheckAllBtn")) $("notifCheckAllBtn").addEventListener("click", () => markAllAttNotifsChecked());
+  if ($("notifSyncBtn")) $("notifSyncBtn").addEventListener("click", async () => {
+    toast("Syncing with server…");
+    const r = await Sync.run("manual");
+    toast(r.msg, r.ok === false);
+    await updateAttendanceAppBadge();
+    await renderNotifSheet();
+  });
+
   // Live HUD counters on kiosk & manager tabs
   async function updateKioskHud() {
     try {
@@ -321,6 +504,7 @@
         $("tabStaffBadge").textContent = String(missing);
         $("tabStaffBadge").hidden = missing === 0;
       }
+      await updateAttendanceAppBadge();
     } catch (e) { /* ignore during early boot */ }
   }
 
@@ -561,6 +745,7 @@
     await DBX.delMeta("mgrPin");
     state.defaultPin = false;
     if ($("mgrPinBanner")) $("mgrPinBanner").hidden = true;
+    await updateAttendanceAppBadge();
   }
   $("btnMgr").addEventListener("click", () => {
     state.live = null;
@@ -1173,6 +1358,7 @@
       $("tabLogBadge").textContent = String(n);
       $("tabLogBadge").hidden = n === 0;
     }
+    await updateAttendanceAppBadge();
   }
   if ($("syncPill")) $("syncPill").addEventListener("click", async () => { toast("Syncing with server…"); const r = await Sync.run("manual"); toast(r.msg, r.ok === false); });
   Sync.onChange(() => { updateSyncDot(); if (state.mgrOpen) renderSettings(); });
@@ -1213,6 +1399,12 @@
       navigator.serviceWorker.register("sw.js").catch(() => {});
       let reloaded = false;
       navigator.serviceWorker.addEventListener("controllerchange", () => { if (!reloaded && navigator.serviceWorker.controller) { reloaded = true; location.reload(); } });
+      navigator.serviceWorker.addEventListener("message", e => {
+        const m = e && e.data;
+        if (!m) return;
+        if (m.notifCheckedId) markAttNotifChecked(m.notifCheckedId);
+        if (m.type === "att-push" && m.payload) pushAttNotif(m.payload);
+      });
     }
   }
 
@@ -1234,6 +1426,7 @@
     calibration: calibrationReport,
     keypad: Keypad,
     punch, hideCard, loadData, openManager, closeManager, lastPunchRecent, recentPunches, startCamera, streamAlive,
+    computeAttendanceNotifs, updateAttendanceAppBadge, markAttNotifChecked, markAllAttNotifsChecked, pushAttNotif,
     db: DBX, sync: Sync, face: Face,
   };
 

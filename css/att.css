@@ -1446,3 +1446,66 @@ input:focus, select:focus {
   .hudIconBtn { width: 40px; height: 40px; }
   .list div { padding: 12px 14px; }
 }
+
+/* ==================== v0.3.4 HOME SCREEN & TOP-RIGHT NOTIFICATION BADGE (#FF3B30) ==================== */
+.hudIconBtn.notifBtn, .mgrBtn { position: relative; overflow: visible; }
+.push-count-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #FF3B30;
+  color: #FFFFFF;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 19px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(255, 59, 48, 0.55);
+  border: 1.5px solid #090e1a;
+  pointer-events: none;
+  z-index: 5;
+  font-variant-numeric: tabular-nums;
+}
+.notifSheetHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.notifList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 52vh;
+  overflow-y: auto;
+  margin: 8px 0;
+}
+.notifItem {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid var(--line);
+  border-left: 3px solid #FF3B30;
+}
+.notifItem.checked {
+  border-left-color: var(--line);
+  opacity: 0.6;
+}
+.notifItemTitle {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.notifItemBody {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}

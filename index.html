@@ -8,10 +8,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Attendance">
-<link rel="manifest" href="manifest.webmanifest?v=0.3.3">
-<link rel="icon" type="image/svg+xml" href="icon.svg?v=0.3.3">
-<link rel="apple-touch-icon" href="icon-180.png?v=0.3.3">
-<link rel="stylesheet" href="css/att.css?v=0.3.3">
+<link rel="manifest" href="manifest.webmanifest?v=0.3.4">
+<link rel="icon" type="image/svg+xml" href="icon.svg?v=0.3.4">
+<link rel="apple-touch-icon" href="icon-180.png?v=0.3.4">
+<link rel="stylesheet" href="css/att.css?v=0.3.4">
 </head>
 <body class="loading">
 
@@ -44,6 +44,10 @@
         <button id="syncPill" class="syncPill" type="button" title="Tap to sync now">
           <div id="syncDot" class="syncDot" title="sync"></div>
           <span id="syncLabel" class="syncLabel">Synced</span>
+        </button>
+        <button id="btnNotif" class="hudIconBtn notifBtn" type="button" title="Notifications &amp; Kiosk Alerts" aria-label="Notifications">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <span id="notifCountBadge" class="push-count-badge" hidden>0</span>
         </button>
         <button id="btnSound" class="hudIconBtn" type="button" title="Toggle sound effects" aria-label="Toggle sound">
           <svg id="icoSoundOn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
@@ -104,6 +108,7 @@
       </button>
       <button id="btnMgr" class="btn icon mgrBtn" aria-label="Manager" title="Manager Portal">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span id="mgrCountBadge" class="push-count-badge" hidden>0</span>
       </button>
     </div>
   </div>
@@ -386,15 +391,35 @@
   </div>
 </section>
 
+<!-- notification & action center sheet -->
+<section id="notifSheet" class="sheet">
+  <div class="sheetBox wide notifSheetBox">
+    <div class="notifSheetHead">
+      <div>
+        <div class="kpTitle" style="text-align:left;margin-bottom:2px">Notifications &amp; Kiosk Alerts</div>
+        <div id="notifSheetSub" class="kpSub" style="text-align:left;margin-bottom:0">Unchecked items appear on the Home Screen app icon badge</div>
+      </div>
+      <button id="notifCloseBtn" class="btn small ghost" type="button">Close</button>
+    </div>
+    <div id="notifList" class="notifList"></div>
+    <div class="row manualActions" style="justify-content:space-between">
+      <button id="notifSyncBtn" class="btn small" type="button">Sync Now</button>
+      <div class="row" style="margin:0">
+        <button id="notifCheckAllBtn" class="btn small primary" type="button">&#10003; Check All</button>
+      </div>
+    </div>
+  </div>
+</section>
+
 <div id="toast" class="toast"></div>
 <canvas id="snap" hidden></canvas>
 
 <script src="vendor/face-api.js"></script>
-<script src="js/config.js?v=0.3.3"></script>
-<script src="js/endpoints.js?v=0.3.3"></script>
-<script src="js/db.js?v=0.3.3"></script>
-<script src="js/face.js?v=0.3.3"></script>
-<script src="js/sync.js?v=0.3.3"></script>
-<script src="js/app.js?v=0.3.3"></script>
+<script src="js/config.js?v=0.3.4"></script>
+<script src="js/endpoints.js?v=0.3.4"></script>
+<script src="js/db.js?v=0.3.4"></script>
+<script src="js/face.js?v=0.3.4"></script>
+<script src="js/sync.js?v=0.3.4"></script>
+<script src="js/app.js?v=0.3.4"></script>
 </body>
 </html>
