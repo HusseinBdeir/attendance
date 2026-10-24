@@ -16,6 +16,9 @@ const Face = (() => {
   let landmarksTiny = true;     // true when only the tiny landmark net is available
 
   const M = () => ATT_CONFIG.match;
+  let _workCanvas = null;
+  let _enhanceCanvas = null;
+  let _missStreak = 0;
 
   function opts(which) {
     const d = which || detector;
@@ -36,35 +39,136 @@ const Face = (() => {
         await faceapi.tf.ready();
       }
       backend = faceapi.tf.getBackend();
-      // the tiny detector is always loaded: liveness loop + fallback
-      await faceapi.nets.tinyFaceDetector.loadFromUri(base);
-      if (M().detector === "ssd") {
-        try { await faceapi.nets.ssdMobilenetv1.loadFromUri(base); detector = "ssd"; }
-        catch (e) { console.warn("SSD detector unavailable, using tiny", e); detector = "tiny"; }
-      }
-      try { await faceapi.nets.faceLandmark68Net.loadFromUri(base); landmarksTiny = false; }
-      catch (e) { console.warn("full landmark net unavailable, using tiny", e); await faceapi.nets.faceLandmark68TinyNet.loadFromUri(base); landmarksTiny = true; }
-      await faceapi.nets.faceRecognitionNet.loadFromUri(base);
+      // Load all neural nets in parallel instead of sequentially
+      const tinyP = faceapi.nets.tinyFaceDetector.loadFromUri(base);
+      const ssdP = (M().detector === "ssd")
+        ? faceapi.nets.ssdMobilenetv1.loadFromUri(base).then(() => { detector = "ssd"; }).catch(e => {
+            console.warn("SSD detector unavailable, using tiny", e);
+            detector = "tiny";
+          })
+        : Promise.resolve();
+      const lmP = faceapi.nets.faceLandmark68Net.loadFromUri(base).then(() => {
+        landmarksTiny = false;
+      }).catch(async e => {
+        console.warn("full landmark net unavailable, using tiny", e);
+        await faceapi.nets.faceLandmark68TinyNet.loadFromUri(base);
+        landmarksTiny = true;
+      });
+      const recP = faceapi.nets.faceRecognitionNet.loadFromUri(base);
+      await Promise.all([tinyP, ssdP, lmP, recP]);
       ready = true;
+      // Warm up WebGL shaders in the background so the first live camera frame never freezes for 2-3s
+      if (typeof document !== "undefined" && (!navigator || !navigator.webdriver)) {
+        setTimeout(() => {
+          try {
+            const warmCv = document.createElement("canvas");
+            warmCv.width = 64;
+            warmCv.height = 64;
+            faceapi.detectSingleFace(warmCv, new faceapi.TinyFaceDetectorOptions({ inputSize: 128, scoreThreshold: 0.99 }))
+              .withFaceLandmarks(landmarksTiny)
+              .withFaceDescriptor()
+              .catch(() => {});
+          } catch (_) {}
+        }, 15);
+      }
     })();
     return loading;
   }
 
   const frameWidth = src => src.videoWidth || src.naturalWidth || src.width || 0;
 
-  function pack(r, src) {
+  function videoToWorkCanvas(src, maxDim = 320) {
+    const sw = src.videoWidth || src.naturalWidth || src.width || 0;
+    const sh = src.videoHeight || src.naturalHeight || src.height || 0;
+    if (!sw || !sh) return null;
+    const scale = (maxDim && sw > maxDim) ? (maxDim / sw) : 1;
+    const tw = Math.max(64, Math.round(sw * scale));
+    const th = Math.max(48, Math.round(sh * scale));
+    const cv = _workCanvas || (_workCanvas = document.createElement("canvas"));
+    if (cv.width !== tw || cv.height !== th) {
+      cv.width = tw;
+      cv.height = th;
+    }
+    cv._scaleX = sw / tw;
+    cv._scaleY = sh / th;
+    cv.getContext("2d").drawImage(src, 0, 0, tw, th);
+    return cv;
+  }
+
+  function buildShadowLiftedCanvas(srcCanvas) {
+    if (!srcCanvas || !srcCanvas.width || !srcCanvas.height) return null;
+    const cv = _enhanceCanvas || (_enhanceCanvas = document.createElement("canvas"));
+    if (cv.width !== srcCanvas.width || cv.height !== srcCanvas.height) {
+      cv.width = srcCanvas.width;
+      cv.height = srcCanvas.height;
+    }
+    cv._scaleX = srcCanvas._scaleX || 1;
+    cv._scaleY = srcCanvas._scaleY || 1;
+    const ctx = cv.getContext("2d");
+    try { ctx.filter = "brightness(1.38) contrast(1.22)"; } catch (_) {}
+    ctx.drawImage(srcCanvas, 0, 0, cv.width, cv.height);
+    try { ctx.filter = "none"; } catch (_) {}
+    return cv;
+  }
+
+  function pack(r, src, scaleX = 1, scaleY = 1) {
     const fw = frameWidth(src);
-    const lm = r.landmarks ? r.landmarks.positions : null;
+    const rawBox = r.detection.box;
+    const box = (scaleX !== 1 || scaleY !== 1)
+      ? { x: rawBox.x * scaleX, y: rawBox.y * scaleY, width: rawBox.width * scaleX, height: rawBox.height * scaleY }
+      : rawBox;
+    const rawLm = r.landmarks ? r.landmarks.positions : null;
+    const lm = (rawLm && (scaleX !== 1 || scaleY !== 1))
+      ? rawLm.map(pt => ({ x: pt.x * scaleX, y: pt.y * scaleY }))
+      : rawLm;
     return {
-      descriptor: r.descriptor, box: r.detection.box, score: r.detection.score,
-      frac: fw ? r.detection.box.width / fw : 1,           // face width as a fraction of the frame
+      descriptor: r.descriptor, box, score: r.detection.score,
+      frac: fw ? box.width / fw : 1,           // face width as a fraction of the frame
       landmarks: lm, ear: lm ? ear(lm) : null,
     };
   }
 
   // One face (the largest) -> {descriptor, box, score, frac, landmarks, ear} | null
   async function detectOne(src) {
-    if (!ready) return null;
+    if (!ready || !src) return null;
+    const isLiveVideo = src.tagName === "VIDEO" || Boolean(src._isLiveEnrolVideo);
+    if (isLiveVideo) {
+      const cv = src.tagName === "VIDEO" ? videoToWorkCanvas(src, 320) : src;
+      if (!cv) return null;
+      const sx = cv._scaleX || 1;
+      const sy = cv._scaleY || 1;
+      // Fast pass (~25-40ms on 320x240): TinyFaceDetector at inputSize 256
+      let r = await faceapi
+        .detectSingleFace(cv, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.22 }))
+        .withFaceLandmarks(landmarksTiny)
+        .withFaceDescriptor();
+      // Immediate SSD fallback on the 320x240 frame if Tiny missed
+      if (!r && detector === "ssd") {
+        r = await faceapi
+          .detectSingleFace(cv, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.26 }))
+          .withFaceLandmarks(landmarksTiny)
+          .withFaceDescriptor();
+      }
+      if (r) {
+        _missStreak = 0;
+        return pack(r, src, sx, sy);
+      }
+      _missStreak++;
+      if (_missStreak % 3 === 1 || src._isLiveEnrolVideo) {
+        const enh = buildShadowLiftedCanvas(cv);
+        if (enh) {
+          r = await faceapi
+            .detectSingleFace(enh, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.20 }))
+            .withFaceLandmarks(landmarksTiny)
+            .withFaceDescriptor();
+          if (r) {
+            _missStreak = 0;
+            return pack(r, src, sx, sy);
+          }
+        }
+      }
+      return null;
+    }
     const r = await faceapi.detectSingleFace(src, opts()).withFaceLandmarks(landmarksTiny).withFaceDescriptor();
     return r ? pack(r, src) : null;
   }
@@ -78,11 +182,20 @@ const Face = (() => {
 
   // Fast path for the liveness (blink) window: tiny detector + landmarks only, no descriptor.
   async function landmarksOnly(src) {
-    if (!ready) return null;
-    const r = await faceapi.detectSingleFace(src, opts("tiny")).withFaceLandmarks(landmarksTiny);
+    if (!ready || !src) return null;
+    const isVideo = src.tagName === "VIDEO";
+    const cv = isVideo ? videoToWorkCanvas(src, 256) : src;
+    if (!cv) return null;
+    const sx = cv._scaleX || 1;
+    const sy = cv._scaleY || 1;
+    const r = await faceapi.detectSingleFace(cv, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.22 })).withFaceLandmarks(landmarksTiny);
     if (!r) return null;
+    const rawBox = r.detection.box;
+    const box = (sx !== 1 || sy !== 1)
+      ? { x: rawBox.x * sx, y: rawBox.y * sy, width: rawBox.width * sx, height: rawBox.height * sy }
+      : rawBox;
     const lm = r.landmarks.positions;
-    return { box: r.detection.box, landmarks: lm, ear: ear(lm) };
+    return { box, landmarks: lm, ear: ear(lm) };
   }
 
   // Eye aspect ratio (Soukupová & Čech 2016) from the 68-point layout:

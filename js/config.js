@@ -5,7 +5,7 @@
 // (generated per site by scripts/att03_endpoints.py, gitignored).
 
 const ATT_CONFIG = {
-  version: "0.3.4",
+  version: "0.3.5",
 
   // Site code -> business-unit display name in Dataverse (exact, the API filters on it).
   sites: {
@@ -48,9 +48,9 @@ const ATT_CONFIG = {
     confirmFrames: 3,     // same person in N consecutive frames before punching
     unknownFrames: 3,     // unknown face in N consecutive frames before the PIN hint
     minFaceFrac: 0.14,    // face box width / frame width: smaller faces (people in the background) are ignored
-    detectorInputSize: 320,   // tiny detector only
-    detectorScore: 0.5,
-    enrolScore: 0.7,      // detector confidence required for an enrolment sample
+    detectorInputSize: 256,   // tiny detector input size (256 = 2x faster than 320/416)
+    detectorScore: 0.35,
+    enrolScore: 0.45,     // detector confidence required for an enrolment sample (relaxed for left/right poses)
     // Guided enrolment: the prompt shown for sample 1..n.
     // v0.2.3: three poses. The matcher keeps every capture as its own key and accepts the
     // nearest one, so a pose only earns its place if the door camera will see it: straight

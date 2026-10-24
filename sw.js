@@ -1,18 +1,18 @@
 // BHFIRMS Attendance kiosk — service worker (v0.3.4): cache-first app shell + models,
 // Web Push + Home Screen Badging API (navigator.setAppBadge) + shared unread notification cache.
 // Bump CACHE AND the ?v= strings in index.html on every deploy (they must match — see PWA.md).
-const CACHE = "bhfatt-v0.3.4";
+const CACHE = "bhfatt-v0.3.5";
 const NOTIF_CACHE = "bhfatt-notif-v1";
 const UNREAD_NOTIFS_URL = "./__att_unread_notifs.json";
 const SHELL = [
   "./",
   "./index.html",
-  "./css/att.css?v=0.3.4",
-  "./js/config.js?v=0.3.4",
-  "./js/db.js?v=0.3.4",
-  "./js/face.js?v=0.3.4",
-  "./js/sync.js?v=0.3.4",
-  "./js/app.js?v=0.3.4",
+  "./css/att.css?v=0.3.5",
+  "./js/config.js?v=0.3.5",
+  "./js/db.js?v=0.3.5",
+  "./js/face.js?v=0.3.5",
+  "./js/sync.js?v=0.3.5",
+  "./js/app.js?v=0.3.5",
   "./vendor/face-api.js",
   "./vendor/models/tiny_face_detector_model-weights_manifest.json",
   "./vendor/models/tiny_face_detector_model.bin",

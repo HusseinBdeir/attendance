@@ -637,19 +637,27 @@
   // Frame-level gate (face size) then descriptor matching.
   async function handleDetection(det, src) {
     if (det.frac < C.match.minFaceFrac) {
-      resetStreak(); drawOverlay(det, "far");
+      if (state.frameSource || (state.missedFrames = (state.missedFrames || 0) + 1) >= 3) {
+        resetStreak();
+      }
+      drawOverlay(det, "far");
       if (!state.busy) hint("Come closer to the camera");
       return { matched: false, reason: "small", frac: det.frac };
     }
+    state.missedFrames = 0;
     return handleDescriptor(det.descriptor, src, det);
   }
 
   async function handleDescriptor(desc, src, det) {
     const faces = usableFaces();
     const m = faces.length ? Face.match(desc, faces) : null;
-    const v = Face.decide(m, state.threshold);
+    // Allow a small +0.05 tolerance on live camera frames 2..N for the same person so a slight head turn never resets the streak
+    const isBuildingLiveStreak = Boolean(!state.frameSource && m && state.streak.staffId === m.staffId && state.streak.n >= 1);
+    const effThreshold = isBuildingLiveStreak ? Math.min(0.62, state.threshold + 0.05) : state.threshold;
+    const v = Face.decide(m, effThreshold);
     if (v.ok) {
       state.unknown = 0;
+      state.missedFrames = 0;
       if (state.streak.staffId === m.staffId) { state.streak.n++; state.streak.dist.push(m.distance); }
       else state.streak = { staffId: m.staffId, n: 1, dist: [m.distance] };
       const st = state.staff.get(m.staffId);
@@ -669,6 +677,10 @@
       }
       return { matched: true, staffId: m.staffId, distance: m.distance, margin: m.margin };
     }
+    if (!state.frameSource && state.streak.n > 0 && (state.missedFrames = (state.missedFrames || 0) + 1) < 3) {
+      drawOverlay(det, "scan");
+      return { matched: false, distance: m ? m.distance : null, reason: v.reason, margin: m ? m.margin : null };
+    }
     resetStreak();
     state.unknown++;
     drawOverlay(det, v.reason === "ambiguous" ? "warn" : "unknown");
@@ -686,7 +698,7 @@
     if (Date.now() > L.until) {
       state.live = null; drawOverlay(null);
       hint("Blink not seen — try again or use PIN", true);
-      return 400;
+      return 120;
     }
     const r = state.liveMock ? state.liveMock() : await Face.landmarksOnly(src);
     if (r && r.ear != null) {
@@ -695,15 +707,15 @@
       else if (L.closed && r.ear > C.liveness.earOpen) {
         state.live = null;
         await punch(L.staffId, "face", L.distance, src, null, (L.weak ? `weak match ${r3(L.distance)}; ` : "") + "blink ok");
-        return 400;
+        return 120;
       }
     }
-    return 60;
+    return 35;
   }
 
   async function loop() {
     if (!state.running) return;
-    let delay = 400;
+    let delay = state.frameSource ? 250 : 75;
     try {
       if (!state.busy && Face.ready) {
         const src = state.frameSource || $("video");
@@ -712,8 +724,19 @@
           if (state.live) delay = await livenessStep(src);
           else {
             const det = await Face.detectOne(src);
-            if (det) { await handleDetection(det, src); delay = 250; }
-            else { resetStreak(); drawOverlay(null); if (state.unknown) state.unknown = 0; if (!state.busy) hint("Look at the camera"); }
+            if (det) {
+              state.missedFrames = 0;
+              await handleDetection(det, src);
+              delay = state.frameSource ? 200 : 30;
+            } else {
+              state.missedFrames = (state.missedFrames || 0) + 1;
+              if (state.frameSource || state.missedFrames >= 3) {
+                resetStreak();
+                drawOverlay(null);
+                if (state.unknown) state.unknown = 0;
+                if (!state.busy) hint("Look at the camera");
+              }
+            }
           }
         }
       }
@@ -848,8 +871,14 @@
     if (v.paused && v.srcObject) v.play().catch(() => {});
     if (v.readyState < 2 || !v.videoWidth) return null;
     const cv = state.enFrame || (state.enFrame = document.createElement("canvas"));
-    cv.width = v.videoWidth; cv.height = v.videoHeight;
-    cv.getContext("2d").drawImage(v, 0, 0);
+    const scale = v.videoWidth > 320 ? (320 / v.videoWidth) : 1;
+    const tw = Math.max(64, Math.round(v.videoWidth * scale));
+    const th = Math.max(48, Math.round(v.videoHeight * scale));
+    if (cv.width !== tw || cv.height !== th) { cv.width = tw; cv.height = th; }
+    cv._scaleX = v.videoWidth / tw;
+    cv._scaleY = v.videoHeight / th;
+    cv._isLiveEnrolVideo = true;
+    cv.getContext("2d").drawImage(v, 0, 0, tw, th);
     return cv;
   }
 
@@ -891,13 +920,53 @@
   function selectEnrol(id) {
     const st = state.staff.get(id); if (!st) return;
     state.enrol = { staffId: id, samples: [], pin: null };
+    state.lastEnrolDet = null;
+    state.lastEnrolDetAt = 0;
+    state.enrolSteady = 0;
     $("enWho").textContent = `${st.name}${st.officialName ? " (" + st.officialName + ")" : ""} — ${sampleCount(id)} sample(s) stored`;
     ["enCapture", "enClear", "enPin", "enConsent"].forEach(x => $(x).disabled = false);
     $("enConsent").checked = false;
     $("enPinState").textContent = st.pinhash ? "PIN already set (Set PIN replaces it)" : "no PIN";
     renderEnrolList($("enSearch").value);
     renderSamples();
+    if (!navigator.webdriver && !state.frameSource) startEnrolPrewarmLoop();
     if (window.innerWidth <= 860 && !navigator.webdriver) { const stu = document.querySelector(".enrolStudio"); if (stu && stu.scrollIntoView) stu.scrollIntoView({ behavior: "smooth", block: "start" }); }
+  }
+
+  let enrolLoopTimer = null;
+  let enrolLoopBusy = false;
+  function startEnrolPrewarmLoop() {
+    clearTimeout(enrolLoopTimer);
+    enrolLoopTimer = setTimeout(enrolPrewarmTick, 45);
+  }
+  async function enrolPrewarmTick() {
+    if (!state.mgrOpen || !state.enrol.staffId || state.enrol.samples.length >= C.match.maxSamples || state.frameSource || navigator.webdriver) return;
+    if (!enrolLoopBusy && Face.ready && streamAlive()) {
+      enrolLoopBusy = true;
+      try {
+        const src = enrolFrame();
+        if (src) {
+          const det = await Face.detectOne(src);
+          if (det && det.descriptor && det.frac >= C.match.minFaceFrac && det.score >= C.match.enrolScore) {
+            state.lastEnrolDet = det;
+            state.lastEnrolDetAt = Date.now();
+            state.enrolSteady = (state.enrolSteady || 0) + 1;
+            const nowMs = Date.now();
+            if (state.enrolSteady >= 2 && nowMs - (state.lastEnrolAutoAt || 0) > 850) {
+              state.enrolSteady = 0;
+              state.lastEnrolAutoAt = nowMs;
+              await captureSample();
+            }
+          } else {
+            state.enrolSteady = 0;
+          }
+        }
+      } catch (_) {}
+      enrolLoopBusy = false;
+    }
+    if (state.mgrOpen && state.enrol.staffId && state.enrol.samples.length < C.match.maxSamples && !state.frameSource && !navigator.webdriver) {
+      enrolLoopTimer = setTimeout(enrolPrewarmTick, 55);
+    }
   }
   function renderSamples() {
     const s = state.enrol.samples;
@@ -932,9 +1001,16 @@
   }
   async function captureSample(src) {
     if (state.enrol.samples.length >= C.match.maxSamples) { toast(`${C.match.maxSamples} samples already taken — save the enrolment`, true); return false; }
+    const isCustomSrc = Boolean(src);
     src = src || enrolFrame();
     if (!src) { toast("Camera not ready — wait a second and try again", true); return false; }
-    const det = await Face.detectOne(src);
+    let det = null;
+    if (!isCustomSrc && !state.frameSource && state.lastEnrolDet && (Date.now() - (state.lastEnrolDetAt || 0)) < 1400) {
+      det = state.lastEnrolDet;
+      state.lastEnrolDet = null;
+    } else {
+      det = await Face.detectOne(src);
+    }
     // a turned pose that finds no face is almost always a FULL turn (profile hides an eye)
     const turning = ["left", "right"].includes(poseIcon(Math.min(state.enrol.samples.length, C.match.poses.length - 1)));
     if (!det) { toast(turning ? "No face found — turn only a little, both eyes must stay in view" : "No face found — look straight at the camera", true); return false; }
