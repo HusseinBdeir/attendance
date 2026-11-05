@@ -139,26 +139,30 @@ const Face = (() => {
       const sy = cv._scaleY || 1;
       // Fast pass (~25-40ms on 320x240): TinyFaceDetector at inputSize 256
       let r = await faceapi
-        .detectSingleFace(cv, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.22 }))
+        .detectSingleFace(cv, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.24 }))
         .withFaceLandmarks(landmarksTiny)
         .withFaceDescriptor();
-      // Immediate SSD fallback on the 320x240 frame if Tiny missed
-      if (!r && detector === "ssd") {
-        r = await faceapi
-          .detectSingleFace(cv, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.26 }))
-          .withFaceLandmarks(landmarksTiny)
-          .withFaceDescriptor();
-      }
       if (r) {
         _missStreak = 0;
         return pack(r, src, sx, sy);
       }
       _missStreak++;
-      if (_missStreak % 3 === 1 || src._isLiveEnrolVideo) {
+      // Throttle heavier SSD / shadow-lift fallback on empty live frames so tablet GPUs never overheat or stall ISP buffers
+      if (!r && detector === "ssd" && (_missStreak % 5 === 0 || src._isLiveEnrolVideo)) {
+        r = await faceapi
+          .detectSingleFace(cv, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.26 }))
+          .withFaceLandmarks(landmarksTiny)
+          .withFaceDescriptor();
+        if (r) {
+          _missStreak = 0;
+          return pack(r, src, sx, sy);
+        }
+      }
+      if (_missStreak % 6 === 0 || src._isLiveEnrolVideo) {
         const enh = buildShadowLiftedCanvas(cv);
         if (enh) {
           r = await faceapi
-            .detectSingleFace(enh, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.20 }))
+            .detectSingleFace(enh, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.22 }))
             .withFaceLandmarks(landmarksTiny)
             .withFaceDescriptor();
           if (r) {

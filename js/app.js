@@ -607,24 +607,42 @@
 
   // ---------- kiosk loop ----------
   const streamAlive = () => !!(state.stream && state.stream.getVideoTracks().some(t => t.readyState === "live"));
-  async function startCamera() {
-    if (streamAlive()) return;
+  let camStarting = false;
+  let lastVideoTime = -1;
+  let lastTimeMoveAt = 0;
+  let lastCamRestartAt = 0;
+  async function startCamera(force = false) {
+    if (camStarting) return;
+    if (!force && streamAlive()) return;
+    camStarting = true;
     if (state.stream) { try { state.stream.getTracks().forEach(t => t.stop()); } catch (e) { /* ignore */ } state.stream = null; }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { hint("Camera needs HTTPS (or localhost) — open the https:// address", true); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { camStarting = false; hint("Camera needs HTTPS (or localhost) — open the https:// address", true); return; }
     try {
-      state.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
-      // phones end the track when the app is backgrounded or the screen locks: restart when it comes back
-      state.stream.getVideoTracks().forEach(t => t.addEventListener("ended", () => { if (document.visibilityState === "visible") setTimeout(() => startCamera().catch(() => {}), 800); }));
+      state.stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 640, max: 960 }, height: { ideal: 480, max: 720 }, frameRate: { ideal: 15, max: 24 } },
+        audio: false
+      }).catch(() => navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      }));
+      // phones/tablets end the track when backgrounded or if Camera HAL disconnects: restart automatically
+      state.stream.getVideoTracks().forEach(t => t.addEventListener("ended", () => {
+        if (document.visibilityState === "visible") setTimeout(() => startCamera(true).catch(() => {}), 800);
+      }));
+      lastVideoTime = -1;
+      lastTimeMoveAt = Date.now();
       $("video").srcObject = state.stream;
       $("enVideo").srcObject = state.stream;
       await new Promise(r => { $("video").onloadedmetadata = r; setTimeout(r, 1500); });
       $("video").play().catch(() => {});
     } catch (e) {
       hint("Camera unavailable: " + (e.message || e), true);
+    } finally {
+      camStarting = false;
     }
   }
-  function resumeCamera() {
-    if (!streamAlive()) { startCamera().catch(() => {}); return; }
+  function resumeCamera(force = false) {
+    if (force || !streamAlive()) { startCamera(true).catch(() => {}); return; }
     const v = $("video"); if (v.paused) v.play().catch(() => {});
   }
   async function keepAwake() {
@@ -715,10 +733,32 @@
 
   async function loop() {
     if (!state.running) return;
-    let delay = state.frameSource ? 250 : 75;
+    let delay = state.frameSource ? 250 : 85;
     try {
       if (!state.busy && Face.ready) {
         const src = state.frameSource || $("video");
+        if (!state.frameSource && !navigator.webdriver) {
+          if (!streamAlive() || src.ended) {
+            if (Date.now() - lastCamRestartAt > 2500) {
+              lastCamRestartAt = Date.now();
+              resumeCamera(true);
+            }
+          } else {
+            if (src.paused) src.play().catch(() => {});
+            const ct = typeof src.currentTime === "number" ? src.currentTime : -1;
+            if (ct >= 0 && ct !== lastVideoTime) {
+              lastVideoTime = ct;
+              lastTimeMoveAt = Date.now();
+            } else if (lastTimeMoveAt > 0 && document.visibilityState === "visible") {
+              const stuckMs = Date.now() - lastTimeMoveAt;
+              if (stuckMs > 1800 && stuckMs <= 3600) src.play().catch(() => {});
+              else if (stuckMs > 3600 && Date.now() - lastCamRestartAt > 3000) {
+                lastCamRestartAt = Date.now();
+                resumeCamera(true);
+              }
+            }
+          }
+        }
         const ok = state.frameSource || (src.readyState >= 2 && src.videoWidth > 0);
         if (ok) {
           if (state.live) delay = await livenessStep(src);
@@ -727,7 +767,7 @@
             if (det) {
               state.missedFrames = 0;
               await handleDetection(det, src);
-              delay = state.frameSource ? 200 : 30;
+              delay = state.frameSource ? 200 : 45;
             } else {
               state.missedFrames = (state.missedFrames || 0) + 1;
               if (state.frameSource || state.missedFrames >= 3) {
