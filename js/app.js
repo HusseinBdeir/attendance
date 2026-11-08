@@ -13,8 +13,12 @@
     device: "",
     threshold: C.match.threshold,   // per-device override lives in meta "threshold"
     liveness: C.liveness.enabled,   // per-device override lives in meta "liveness"
+    redactedMode: false,            // per-device override lives in meta "redactedMode"
     sound: true,                    // per-device override lives in meta "sound"
     faces: [],            // [{id, staffId, d}] in memory for matching
+    redactedFaceCounts: new Map(), // staffId -> sample count when vectors are scrubbed
+    redactedStreak: [],   // consecutive descriptors stabilized before server 1:N verify
+    verifyingRedacted: false,
     staff: new Map(),     // id -> {id, name, officialName, pinhash, active}
     stream: null,
     running: false,
@@ -204,11 +208,12 @@
 
   // ---------- keypad (with live lockout countdown & keyboard support) ----------
   const Keypad = (() => {
-    let buf = "", cb = null, len = C.pinLength, fails = 0, lockedUntil = 0, title = "", lockTimer = null;
+    let buf = "", cb = null, len = C.pinLength, fails = 0, lockedUntil = 0, title = "", lockTimer = null, verifying = false, shakeTimer = null;
     const locked = () => Date.now() < lockedUntil;
     const remaining = () => Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000));
-    function render() {
-      $("kpDots").innerHTML = Array.from({ length: len }, (_, i) => `<i class="${i < buf.length ? "on" : ""}"></i>`).join("");
+    function render(forceFilledCount) {
+      const filled = typeof forceFilledCount === "number" ? forceFilledCount : buf.length;
+      $("kpDots").innerHTML = Array.from({ length: len }, (_, i) => `<i class="${i < filled ? "on" : ""}"></i>`).join("");
       $("kpTitle").textContent = locked() ? `Too many attempts — wait ${remaining()} s` : title;
       if ($("kpSub")) {
         $("kpSub").textContent = locked()
@@ -224,36 +229,57 @@
       }, 500);
     }
     function open(t, onDone, length) {
+      clearTimeout(shakeTimer); shakeTimer = null;
+      verifying = false;
       buf = ""; cb = onDone; len = length || C.pinLength; title = t;
+      $("kpDots").classList.remove("shake");
       render();
       $("keypad").classList.add("open");
       state.busy = true;
     }
-    function close() { $("keypad").classList.remove("open"); buf = ""; cb = null; state.busy = false; }
+    function close() {
+      clearTimeout(shakeTimer); shakeTimer = null;
+      verifying = false;
+      $("kpDots").classList.remove("shake");
+      $("keypad").classList.remove("open");
+      buf = ""; cb = null; state.busy = false;
+    }
     function shake() {
       Sound.play("warn");
+      buf = "";
+      render(len);
       const d = $("kpDots"); d.classList.add("shake");
-      setTimeout(() => { d.classList.remove("shake"); buf = ""; render(); }, 450);
+      clearTimeout(shakeTimer);
+      shakeTimer = setTimeout(() => { shakeTimer = null; d.classList.remove("shake"); render(); }, 450);
     }
     async function pressKey(k) {
       if (k === "x") { const c = cb; close(); if (c) c(null); return; }
-      if (locked()) { render(); return; }
+      if (verifying) return;
+      if (shakeTimer) { clearTimeout(shakeTimer); shakeTimer = null; $("kpDots").classList.remove("shake"); }
+      if (locked()) { buf = ""; render(); return; }
       if (k === "b") { buf = buf.slice(0, -1); Sound.play("tap"); render(); return; }
       if (buf.length >= len) return;
       Sound.play("tap");
       buf += k; render();
       if (buf.length === len) {
-        const pin = buf; const c = cb;
-        const ok = await c(pin);
-        if (ok === false) {
-          fails++;
-          if (fails >= C.pinLockAfter) {
-            lockedUntil = Date.now() + C.pinLockSec * 1000;
-            fails = 0;
-            startLockTicker();
-          }
-          shake();
-        } else { fails = 0; close(); }
+        const pin = buf;
+        buf = "";
+        const c = cb;
+        verifying = true;
+        try {
+          const ok = c ? await c(pin) : false;
+          if (ok === false) {
+            fails++;
+            if (fails >= C.pinLockAfter) {
+              lockedUntil = Date.now() + C.pinLockSec * 1000;
+              fails = 0;
+              startLockTicker();
+            }
+            shake();
+          } else { fails = 0; close(); }
+        } finally {
+          verifying = false;
+        }
       }
     }
     $("keypad").querySelectorAll("button").forEach(b => b.addEventListener("click", () => pressKey(b.dataset.k)));
@@ -279,12 +305,26 @@
     state.threshold = (t > 0 && t < 1) ? t : C.match.threshold;
     const lv = await DBX.getMeta("liveness", null);
     state.liveness = lv == null ? C.liveness.enabled : !!lv;
+    state.redactedMode = !!(await DBX.getMeta("redactedMode", false));
     const snd = await DBX.getMeta("sound", null);
     state.sound = snd == null ? true : !!snd;
     state.defaultPin = !(await DBX.getMeta("mgrPinHash", ""));
     const staff = await DBX.allStaff();
     state.staff = new Map(staff.map(s => [s.id, s]));
-    state.faces = (await DBX.allFaces()).filter(f => Array.isArray(f.d) && f.d.length === 128);
+    const allFaceRows = await DBX.allFaces();
+    state.faces = allFaceRows.filter(f => Array.isArray(f.d) && f.d.length === 128);
+    const redCounts = new Map();
+    allFaceRows.forEach(f => {
+      if (f && f.staffId && (f.faceRedacted || (Array.isArray(f.d) && f.d.length === 128))) {
+        redCounts.set(f.staffId, (redCounts.get(f.staffId) || 0) + 1);
+      }
+    });
+    staff.forEach(s => {
+      if (s && typeof s.serverSamples === "number" && s.serverSamples > (redCounts.get(s.id) || 0)) {
+        redCounts.set(s.id, s.serverSamples);
+      }
+    });
+    state.redactedFaceCounts = redCounts;
     const siteLabel = (C.sites[state.site] || {}).name || state.site;
     $("siteName").textContent = siteLabel;
     if ($("mgrSiteBadge")) $("mgrSiteBadge").textContent = siteLabel;
@@ -293,11 +333,18 @@
     updateSoundUi();
     await updateKioskHud();
   }
+  function hasStaffPin(s) {
+    return !!(s && (s.pinhash || (state.redactedMode && (s.hasPin || s.pinRedacted))));
+  }
   function usableFaces() {
     // only staff with >= minSamples samples and an active roster entry
     const count = new Map();
     state.faces.forEach(f => count.set(f.staffId, (count.get(f.staffId) || 0) + 1));
     return state.faces.filter(f => count.get(f.staffId) >= C.match.minSamples && (state.staff.get(f.staffId) || {}).active !== false);
+  }
+  function enrolledStaffCount() {
+    const active = [...state.staff.values()].filter(s => s.active !== false);
+    return active.filter(s => sampleCount(s.id) >= C.match.minSamples).length;
   }
   const staffNames = () => new Map([...state.staff.values()].map(s => [s.id, s.name]));
 
@@ -338,7 +385,7 @@
         });
       }
       const activeStaff = [...state.staff.values()].filter(s => s.active !== false);
-      const missing = activeStaff.filter(s => sampleCount(s.id) < C.match.minSamples && !s.pinhash).length;
+      const missing = activeStaff.filter(s => sampleCount(s.id) < C.match.minSamples && !hasStaffPin(s)).length;
       if (missing > 0) {
         const id = "att-missing-" + missing;
         items.push({
@@ -492,15 +539,16 @@
       latestByStaff.forEach(p => { if (p.direction === "in" && Date.now() - new Date(p.ts).getTime() <= win) onSite++; });
       if ($("onSiteCount")) $("onSiteCount").textContent = `${onSite} on-site`;
 
-      const enrolledPersons = new Set(usableFaces().map(f => f.staffId)).size;
+      const enrolledPersons = enrolledStaffCount();
       const activeTotal = [...state.staff.values()].filter(s => s.active !== false).length;
       if ($("kioskStats")) {
+        const redTag = state.redactedMode ? " · Redacted 1:N" : "";
         $("kioskStats").textContent = activeTotal
-          ? `${enrolledPersons} / ${activeTotal} Face IDs Ready · ${todayRows.length} events today`
-          : "Face ID & PIN Ready";
+          ? `${enrolledPersons} / ${activeTotal} Face IDs Ready${redTag} · ${todayRows.length} events today`
+          : `Face ID & PIN Ready${redTag}`;
       }
       if ($("tabStaffBadge")) {
-        const missing = [...state.staff.values()].filter(s => s.active !== false && sampleCount(s.id) < C.match.minSamples && !s.pinhash).length;
+        const missing = [...state.staff.values()].filter(s => s.active !== false && sampleCount(s.id) < C.match.minSamples && !hasStaffPin(s)).length;
         $("tabStaffBadge").textContent = String(missing);
         $("tabStaffBadge").hidden = missing === 0;
       }
@@ -530,6 +578,7 @@
   async function punch(staffId, method, confidence, src, forcedDirection, note) {
     const st = state.staff.get(staffId);
     if (!st) { toast("Unknown staff id", true); return null; }
+    if (!forcedDirection && st.active === false) { toast("Staff account is inactive", true); return null; }
     const n = nowLocal();
     const last = await lastPunchRecent(staffId);
     if (!forcedDirection && last && (Date.now() - new Date(last.ts).getTime()) < C.punch.debounceMinutes * 60000) {
@@ -650,7 +699,35 @@
   }
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { keepAwake(); if (state.running) resumeCamera(); } });
 
-  function resetStreak() { state.streak = { staffId: null, n: 0, dist: [] }; setStreakProgress(0); }
+  function isFiniteDesc128(v) {
+    if (!v || v.length !== 128) return false;
+    for (let i = 0; i < 128; i++) {
+      const n = Number(v[i]);
+      if (v[i] === null || v[i] === "" || typeof v[i] === "boolean" || !Number.isFinite(n)) return false;
+    }
+    return true;
+  }
+  function dist128(a, b) {
+    if (!isFiniteDesc128(a) || !isFiniteDesc128(b)) return 99;
+    let s = 0;
+    for (let i = 0; i < 128; i++) { const d = Number(a[i]) - Number(b[i]); s += d * d; }
+    const out = Math.sqrt(s);
+    return Number.isFinite(out) ? out : 99;
+  }
+  function avgDescriptors(list) {
+    const valid = (list || []).filter(isFiniteDesc128);
+    if (!valid.length) return null;
+    const out = new Array(128).fill(0);
+    for (const d of valid) for (let i = 0; i < 128; i++) out[i] += Number(d[i]);
+    for (let i = 0; i < 128; i++) out[i] = Math.round((out[i] / valid.length) * 1e6) / 1e6;
+    return out;
+  }
+
+  function resetStreak() {
+    state.streak = { staffId: null, n: 0, dist: [] };
+    state.redactedStreak = [];
+    setStreakProgress(0);
+  }
 
   // Frame-level gate (face size) then descriptor matching.
   async function handleDetection(det, src) {
@@ -667,15 +744,21 @@
   }
 
   async function handleDescriptor(desc, src, det) {
+    if (!isFiniteDesc128(desc)) {
+      resetStreak();
+      return { matched: false, reason: "bad-descriptor" };
+    }
     const faces = usableFaces();
     const m = faces.length ? Face.match(desc, faces) : null;
     // Allow a small +0.05 tolerance on live camera frames 2..N for the same person so a slight head turn never resets the streak
     const isBuildingLiveStreak = Boolean(!state.frameSource && m && state.streak.staffId === m.staffId && state.streak.n >= 1);
     const effThreshold = isBuildingLiveStreak ? Math.min(0.62, state.threshold + 0.05) : state.threshold;
     const v = Face.decide(m, effThreshold);
+
     if (v.ok) {
       state.unknown = 0;
       state.missedFrames = 0;
+      state.redactedStreak = [];
       if (state.streak.staffId === m.staffId) { state.streak.n++; state.streak.dist.push(m.distance); }
       else state.streak = { staffId: m.staffId, n: 1, dist: [m.distance] };
       const st = state.staff.get(m.staffId);
@@ -695,6 +778,72 @@
       }
       return { matched: true, staffId: m.staffId, distance: m.distance, margin: m.margin };
     }
+
+    // In Server-Redacted 1:N Mode, fall through to server verify whenever no local vector matched
+    // (including when 1 new unsynced local enrolment coexists with server-redacted staff).
+    if (state.redactedMode && v.reason !== "ambiguous") {
+      const activeCount = [...state.staff.values()].filter(s => s.active !== false).length;
+      if (!activeCount) {
+        resetStreak();
+        state.unknown++;
+        drawOverlay(det, "unknown");
+        if (state.unknown >= C.match.unknownFrames && !state.busy) hint("No enrolments yet - tap Use PIN", true);
+        return { matched: false, reason: "no-enrolments", redacted: true };
+      }
+      const arr = Array.from(desc);
+      if (state.redactedStreak.length) {
+        const prev = state.redactedStreak[state.redactedStreak.length - 1];
+        if (dist128(arr, prev) > 0.34) state.redactedStreak = [];
+      }
+      state.redactedStreak.push(arr);
+      setStreakProgress(state.redactedStreak.length / C.match.confirmFrames);
+      drawOverlay(det, "scan");
+      if (state.redactedStreak.length < C.match.confirmFrames) {
+        if (!state.busy) hint("Hold steady…", false, "ok");
+        return { matched: false, reason: "stabilizing", streak: state.redactedStreak.length, redacted: true };
+      }
+      if (state.verifyingRedacted) return { matched: false, reason: "verifying", redacted: true };
+      const probe = avgDescriptors(state.redactedStreak.slice(-C.match.confirmFrames));
+      state.redactedStreak = [];
+      if (!probe) return { matched: false, reason: "bad-descriptor", redacted: true };
+      state.verifyingRedacted = true;
+      try {
+        const vr = await Sync.verify({ method: "face", descriptor: probe, threshold: state.threshold });
+        if (state.mgrOpen || Keypad.isOpen || state.cardPunch || !state.running) {
+          return { matched: false, reason: "cancelled", redacted: true };
+        }
+        const matchedSt = (vr && vr.matched && vr.staffId) ? state.staff.get(vr.staffId) : null;
+        if (matchedSt && matchedSt.active !== false) {
+          state.unknown = 0;
+          state.missedFrames = 0;
+          drawOverlay(det, "ok");
+          if (state.liveness) {
+            state.live = { staffId: vr.staffId, distance: null, weak: !!vr.weak, until: Date.now() + C.liveness.windowSec * 1000, closed: false };
+            hint("Please blink to confirm", false, "live");
+            return { matched: true, staffId: vr.staffId, liveness: "pending", redacted: true };
+          }
+          await punch(vr.staffId, "face", null, src, null, vr.weak ? "weak match (server)" : "");
+          return { matched: true, staffId: vr.staffId, weak: !!vr.weak, redacted: true };
+        }
+        setStreakProgress(0);
+        const rsn = (vr && vr.matched && (!matchedSt || matchedSt.active === false)) ? "inactive" : ((vr && vr.reason) || "far");
+        state.unknown = Math.max(state.unknown + 1, C.match.unknownFrames);
+        drawOverlay(det, rsn === "ambiguous" ? "warn" : "unknown");
+        if (!state.busy) {
+          if (rsn === "no-enrolments") hint("No enrolments yet - tap Use PIN", true);
+          else if (rsn === "ambiguous") hint("Close match with a colleague - use your PIN", true);
+          else hint("Not recognised - tap Use PIN", true);
+        }
+        return { matched: false, reason: rsn, redacted: true };
+      } catch (err) {
+        setStreakProgress(0);
+        if (!state.busy) hint("Server offline - try again or tap Use PIN", true);
+        return { matched: false, reason: "offline", redacted: true };
+      } finally {
+        state.verifyingRedacted = false;
+      }
+    }
+
     if (!state.frameSource && state.streak.n > 0 && (state.missedFrames = (state.missedFrames || 0) + 1) < 3) {
       drawOverlay(det, "scan");
       return { matched: false, distance: m ? m.distance : null, reason: v.reason, margin: m ? m.margin : null };
@@ -724,7 +873,8 @@
       if (r.ear < C.liveness.earClosed) L.closed = true;
       else if (L.closed && r.ear > C.liveness.earOpen) {
         state.live = null;
-        await punch(L.staffId, "face", L.distance, src, null, (L.weak ? `weak match ${r3(L.distance)}; ` : "") + "blink ok");
+        const weakTag = L.weak ? (L.distance != null ? `weak match ${r3(L.distance)}; ` : "weak match (server); ") : "";
+        await punch(L.staffId, "face", L.distance, src, null, weakTag + "blink ok");
         return 120;
       }
     }
@@ -790,7 +940,19 @@
     Keypad.open("Enter your PIN", async pin => {
       if (pin === null) return;
       const h = await sha256(pin);
-      const st = [...state.staff.values()].find(s => s.pinhash === h && s.active !== false);
+      let st = [...state.staff.values()].find(s => s.pinhash === h && s.active !== false);
+      if (!st && state.redactedMode) {
+        try {
+          const vr = await Sync.verify({ method: "pin", pinhash: h });
+          if (vr && vr.matched && vr.staffId) {
+            st = state.staff.get(vr.staffId);
+            if (st && st.active === false) st = null;
+          }
+        } catch (err) {
+          toast("Offline - server PIN check unavailable", true);
+          return null;
+        }
+      }
       if (!st) return false;
       await punch(st.id, "pin", null, state.frameSource || $("video"));
       return true;
@@ -928,7 +1090,11 @@
     return [...state.staff.values()].filter(s => s.active !== false && (!q || s.name.toLowerCase().includes(q) || (s.officialName || "").toLowerCase().includes(q)))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
-  function sampleCount(staffId) { return state.faces.filter(f => f.staffId === staffId).length; }
+  function sampleCount(staffId) {
+    const local = state.faces.filter(f => f.staffId === staffId).length;
+    if (local > 0) return local;
+    return state.redactedMode ? (state.redactedFaceCounts.get(staffId) || 0) : 0;
+  }
 
   function updateEnrolCoverage() {
     const active = [...state.staff.values()].filter(s => s.active !== false);
@@ -945,9 +1111,9 @@
     let list = staffMatches(q);
     if (state.enFilter === "missing") list = list.filter(s => sampleCount(s.id) < C.match.minSamples);
     else if (state.enFilter === "ready") list = list.filter(s => sampleCount(s.id) >= C.match.minSamples);
-    else if (state.enFilter === "pin") list = list.filter(s => !!s.pinhash);
+    else if (state.enFilter === "pin") list = list.filter(s => hasStaffPin(s));
 
-    el.innerHTML = list.map(s => `<div data-id="${s.id}" class="${s.id === state.enrol.staffId ? "sel" : ""}">${esc(s.name)}<small>${sampleCount(s.id)} samples${s.pinhash ? " · PIN" : ""}</small></div>`).join("") || `<div class="muted">No staff in the roster. Settings → Refresh roster.</div>`;
+    el.innerHTML = list.map(s => `<div data-id="${s.id}" class="${s.id === state.enrol.staffId ? "sel" : ""}">${esc(s.name)}<small>${sampleCount(s.id)} samples${hasStaffPin(s) ? " · PIN" : ""}</small></div>`).join("") || `<div class="muted">No staff in the roster. Settings → Refresh roster.</div>`;
     el.querySelectorAll("div[data-id]").forEach(d => d.addEventListener("click", () => selectEnrol(d.dataset.id)));
   }
   $("enSearch").addEventListener("input", e => renderEnrolList(e.target.value));
@@ -966,7 +1132,7 @@
     $("enWho").textContent = `${st.name}${st.officialName ? " (" + st.officialName + ")" : ""} — ${sampleCount(id)} sample(s) stored`;
     ["enCapture", "enClear", "enPin", "enConsent"].forEach(x => $(x).disabled = false);
     $("enConsent").checked = false;
-    $("enPinState").textContent = st.pinhash ? "PIN already set (Set PIN replaces it)" : "no PIN";
+    $("enPinState").textContent = hasStaffPin(st) ? "PIN already set (Set PIN replaces it)" : "no PIN";
     renderEnrolList($("enSearch").value);
     renderSamples();
     if (!navigator.webdriver && !state.frameSource) startEnrolPrewarmLoop();
@@ -1056,13 +1222,25 @@
     if (!det) { toast(turning ? "No face found — turn only a little, both eyes must stay in view" : "No face found — look straight at the camera", true); return false; }
     if (det.frac < C.match.minFaceFrac) { toast("Too far — come closer to the camera", true); return false; }
     if (det.score < C.match.enrolScore) { toast(turning ? "Face not clear enough — turn less, more light" : "Face not clear enough — more light, look straight", true); return false; }
-    // reject a sample that already matches someone ELSE's enrolment
+    // reject a sample that already matches someone ELSE's enrolment (local or server-redacted)
     const other = usableFaces().filter(f => f.staffId !== state.enrol.staffId);
     const m = other.length ? Face.match(det.descriptor, other) : null;
     if (m && m.distance <= state.threshold * 0.8) {
       const who = state.staff.get(m.staffId);
       toast(`This face already matches ${who ? who.name : "another person"}`, true);
       return false;
+    }
+    if (state.redactedMode && navigator.onLine) {
+      const vr = await Sync.verify({
+        method: "face",
+        descriptor: Array.from(det.descriptor),
+        threshold: Math.min(0.58, state.threshold + C.match.margin),
+      }).catch(() => null);
+      if (vr && vr.matched && vr.staffId && vr.staffId !== state.enrol.staffId) {
+        const who = state.staff.get(vr.staffId);
+        toast(`This face already matches ${who ? who.name : "another person"}`, true);
+        return false;
+      }
     }
     state.enrol.samples.push({ d: Array.from(det.descriptor), thumb: snapshot(src) });
     Sound.play("capture");
@@ -1072,11 +1250,15 @@
   $("enCapture").addEventListener("click", () => captureSample());
   $("enClear").addEventListener("click", async () => {
     state.enrol.samples = [];
-    if (state.enrol.staffId && sampleCount(state.enrol.staffId)) {
+    const targetId = state.enrol.staffId;
+    if (targetId && sampleCount(targetId)) {
       if (!confirm("Also delete the stored samples on this tablet? (server copies stay)")) { renderSamples(); return; }
-      for (const f of state.faces.filter(f => f.staffId === state.enrol.staffId)) await DBX.deleteFace(f.id);
-      state.faces = state.faces.filter(f => f.staffId !== state.enrol.staffId);
-      selectEnrol(state.enrol.staffId);
+      for (const f of await DBX.facesForStaff(targetId)) await DBX.deleteFace(f.id);
+      state.faces = state.faces.filter(f => f.staffId !== targetId);
+      state.redactedFaceCounts.delete(targetId);
+      const st = state.staff.get(targetId);
+      if (st && st.serverSamples) { st.serverSamples = 0; await DBX.saveStaff(st); }
+      selectEnrol(targetId);
     }
     renderSamples();
   });
@@ -1086,6 +1268,14 @@
       const h = await sha256(pin);
       const clash = [...state.staff.values()].find(s => s.pinhash === h && s.id !== state.enrol.staffId);
       if (clash) { toast("That PIN is already used by " + clash.name, true); return false; }
+      if (state.redactedMode && navigator.onLine) {
+        const vr = await Sync.verify({ method: "pin", pinhash: h }).catch(() => null);
+        if (vr && vr.matched && vr.staffId && vr.staffId !== state.enrol.staffId) {
+          const who = state.staff.get(vr.staffId);
+          toast("That PIN is already used by " + (who ? who.name : "another staff member"), true);
+          return false;
+        }
+      }
       state.enrol.pin = { pin, hash: h };
       $("enPinState").textContent = "PIN set (saved with the enrolment)";
       renderSamples();
@@ -1105,18 +1295,74 @@
     const e = state.enrol; if (!e.staffId) return false;
     if (e.samples.length && !$("enConsent").checked) { toast("Tick the consent box first", true); return false; }
     const st = state.staff.get(e.staffId);
-    const consentAt = e.samples.length ? new Date().toISOString() : "";
+    const nowIso = new Date().toISOString();
+    const consentAt = e.samples.length ? nowIso : "";
     const device = await DBX.getMeta("device", "");
     const pinhash = e.pin ? e.pin.hash : (st.pinhash || "");
-    // replace previous samples for this person
-    for (const f of state.faces.filter(f => f.staffId === e.staffId)) await DBX.deleteFace(f.id);
-    state.faces = state.faces.filter(f => f.staffId !== e.staffId);
-    const rows = e.samples.map((s, i) => ({ id: uuid(), staffId: e.staffId, staffName: st.name, d: s.d, sample: i + 1, consentAt, pinhash, ts: new Date().toISOString(), device, synced: 0 }));
-    if (!rows.length && e.pin) rows.push({ id: uuid(), staffId: e.staffId, staffName: st.name, d: [], sample: 0, consentAt: "", pinhash, ts: new Date().toISOString(), device, synced: 0 });
-    for (const r of rows) await DBX.saveFace(r);
-    const sep = separation(e.staffId, rows.filter(r => r.d.length === 128));
-    state.faces.push(...rows.filter(r => r.d.length === 128));
-    if (e.pin) { st.pinhash = e.pin.hash; await DBX.saveStaff(st); }
+    const priorFaces = await DBX.facesForStaff(e.staffId);
+    let rows = [];
+
+    if (e.samples.length > 0) {
+      // Replace previous samples (including redacted stubs) for this person using deterministic pose IDs
+      for (const f of priorFaces) await DBX.deleteFace(f.id);
+      state.faces = state.faces.filter(f => f.staffId !== e.staffId);
+      state.redactedFaceCounts.delete(e.staffId);
+      rows = e.samples.map((s, i) => ({
+        id: `${e.staffId}:${i + 1}`,
+        staffId: e.staffId,
+        staffName: st.name,
+        d: s.d,
+        sample: i + 1,
+        consentAt,
+        pinhash,
+        ts: nowIso,
+        device,
+        synced: 0,
+      }));
+      for (const r of rows) await DBX.saveFace(r);
+      state.faces.push(...rows.filter(r => r.d.length === 128));
+    } else if (e.pin) {
+      // PIN-only save/rotation: preserve existing face vectors & redacted face stubs; overwrite sample=0 / pinhash deterministically
+      for (const f of priorFaces.filter(f => !f.sample || Number(f.sample) === 0)) {
+        await DBX.deleteFace(f.id);
+      }
+      const localVecRows = priorFaces.filter(f => Number(f.sample) > 0 && Array.isArray(f.d) && f.d.length === 128);
+      if (localVecRows.length > 0) {
+        for (const f of localVecRows) {
+          f.pinhash = e.pin.hash;
+          f.ts = nowIso;
+          f.synced = 0;
+          await DBX.saveFace(f);
+        }
+        rows = localVecRows;
+      } else {
+        const pinRow = {
+          id: `${e.staffId}:0`,
+          staffId: e.staffId,
+          staffName: st.name,
+          d: [],
+          sample: 0,
+          consentAt: "",
+          pinhash: e.pin.hash,
+          ts: nowIso,
+          device,
+          synced: 0,
+        };
+        await DBX.saveFace(pinRow);
+        rows = [pinRow];
+      }
+    }
+
+    const sep = separation(e.staffId, rows.filter(r => Array.isArray(r.d) && r.d.length === 128));
+    if (e.pin) {
+      st.pinhash = e.pin.hash;
+      st.hasPin = true;
+      delete st.pinRedacted;
+      await DBX.saveStaff(st);
+    } else if (st.pinRedacted || st.hasPin) {
+      st.hasPin = true;
+      await DBX.saveStaff(st);
+    }
     if (sep) {
       const who = state.staff.get(sep.staffId);
       const close = sep.distance < state.threshold + C.match.margin;
@@ -1152,18 +1398,29 @@
           const pendOk = pend.length >= C.match.minSamples;
           let faces = usableFaces();
           if (pendOk) faces = faces.filter(f => f.staffId !== state.enrol.staffId).concat(pend.map(s => ({ staffId: state.enrol.staffId, d: s.d, pending: true })));
+          const nm = id => esc((state.staff.get(id) || {}).name || "?");
           const m = faces.length ? Face.match(det.descriptor, faces) : null;
           const v = Face.decide(m, state.threshold);
-          const nm = id => esc((state.staff.get(id) || {}).name || "?");
-          const reasons = { far: "no enrolled face is close enough", ambiguous: "two people are too close to tell apart", "no-enrolments": "no usable enrolments on this device" };
-          const unsaved = m && pendOk && m.staffId === state.enrol.staffId ? `<span class="pend">not saved yet — press Save enrolment</span> · ` : "";
-          const short = pend.length && !pendOk ? `<span class="pend">only ${pend.length} of ${C.match.minSamples} samples taken for ${nm(state.enrol.staffId)} — capture the rest, then press Save enrolment</span>` : "";
-          if (!m && short) big("bad", `✗ Only ${pend.length} of ${C.match.minSamples} samples taken`, short);
-          else if (!m) big("bad", "✗ No usable enrolments on this device", "save at least " + C.match.minSamples + " samples for someone first");
-          else big(v.ok ? "ok" : "bad", v.ok ? `✓ ${nm(m.staffId)}${v.weak ? " (weak)" : ""}` : `✗ Not recognised`,
-            unsaved + (short ? short + " · " : "") + `${v.ok ? "" : (reasons[v.reason] || v.reason) + " · "}closest: ${nm(m.staffId)} at ${r3(m.distance)}` +
-            (m.runnerUp ? ` · next: ${nm(m.runnerUp.staffId)} at ${r3(m.runnerUp.distance)} (gap ${r3(m.margin)})` : " · no other enrolled person") +
-            ` · threshold ${state.threshold} · margin ${C.match.margin}`);
+          if (state.redactedMode && !pendOk && (!m || !v.ok)) {
+            const vr = await Sync.verify({ method: "face", descriptor: Array.from(det.descriptor), threshold: state.threshold });
+            const vrSt = (vr && vr.matched && vr.staffId) ? state.staff.get(vr.staffId) : null;
+            if (vrSt && vrSt.active !== false) {
+              big("ok", `✓ ${nm(vr.staffId)}${vr.weak ? " (weak)" : ""}`, "verified via Server-Redacted 1:N (0 local vectors)");
+            } else {
+              const rsn = (vr && vr.matched && (!vrSt || vrSt.active === false)) ? "inactive" : ((vr && vr.reason) || "far");
+              big("bad", "✗ Not recognised", `server 1:N status: ${esc(rsn)} · threshold ${state.threshold} · margin ${C.match.margin}`);
+            }
+          } else {
+            const reasons = { far: "no enrolled face is close enough", ambiguous: "two people are too close to tell apart", "no-enrolments": "no usable enrolments on this device" };
+            const unsaved = m && pendOk && m.staffId === state.enrol.staffId ? `<span class="pend">not saved yet — press Save enrolment</span> · ` : "";
+            const short = pend.length && !pendOk ? `<span class="pend">only ${pend.length} of ${C.match.minSamples} samples taken for ${nm(state.enrol.staffId)} — capture the rest, then press Save enrolment</span>` : "";
+            if (!m && short) big("bad", `✗ Only ${pend.length} of ${C.match.minSamples} samples taken`, short);
+            else if (!m) big("bad", "✗ No usable enrolments on this device", "save at least " + C.match.minSamples + " samples for someone first");
+            else big(v.ok ? "ok" : "bad", v.ok ? `✓ ${nm(m.staffId)}${v.weak ? " (weak)" : ""}` : `✗ Not recognised`,
+              unsaved + (short ? short + " · " : "") + `${v.ok ? "" : (reasons[v.reason] || v.reason) + " · "}closest: ${nm(m.staffId)} at ${r3(m.distance)}` +
+              (m.runnerUp ? ` · next: ${nm(m.runnerUp.staffId)} at ${r3(m.runnerUp.distance)} (gap ${r3(m.margin)})` : " · no other enrolled person") +
+              ` · threshold ${state.threshold} · margin ${C.match.margin}`);
+          }
         }
       }
     } catch (e) { big("bad", "Test error", esc(String(e.message || e))); }
@@ -1180,8 +1437,8 @@
     const allRows = [...state.staff.values()].sort((a, b) => a.name.localeCompare(b.name));
     const active = allRows.filter(s => s.active !== false);
     const faceReady = active.filter(s => sampleCount(s.id) >= C.match.minSamples).length;
-    const pinReady = active.filter(s => !!s.pinhash).length;
-    const missing = active.filter(s => sampleCount(s.id) < C.match.minSamples && !s.pinhash).length;
+    const pinReady = active.filter(s => hasStaffPin(s)).length;
+    const missing = active.filter(s => sampleCount(s.id) < C.match.minSamples && !hasStaffPin(s)).length;
     if ($("kpiStTotal")) $("kpiStTotal").textContent = String(active.length);
     if ($("kpiStFace")) $("kpiStFace").textContent = String(faceReady);
     if ($("kpiStFaceSub")) $("kpiStFaceSub").textContent = active.length ? `${Math.round((faceReady / active.length) * 100)}% of active roster` : "3 / 3 samples stored";
@@ -1191,16 +1448,17 @@
     const q = ($("stSearch") ? $("stSearch").value : "").trim().toLowerCase();
     let rows = allRows.filter(s => !q || s.name.toLowerCase().includes(q) || (s.officialName || "").toLowerCase().includes(q));
     if (state.stFilter === "face") rows = rows.filter(s => sampleCount(s.id) >= C.match.minSamples);
-    else if (state.stFilter === "pin") rows = rows.filter(s => !!s.pinhash && sampleCount(s.id) < C.match.minSamples);
-    else if (state.stFilter === "none") rows = rows.filter(s => sampleCount(s.id) < C.match.minSamples && !s.pinhash);
+    else if (state.stFilter === "pin") rows = rows.filter(s => hasStaffPin(s) && sampleCount(s.id) < C.match.minSamples);
+    else if (state.stFilter === "none") rows = rows.filter(s => sampleCount(s.id) < C.match.minSamples && !hasStaffPin(s));
 
     const tb = $("stTable").querySelector("tbody");
     tb.innerHTML = rows.map(s => {
       const sc = sampleCount(s.id);
+      const isCloudOnly = state.redactedMode && state.faces.filter(f => f.staffId === s.id).length === 0 && sc >= C.match.minSamples;
       const sampleBadge = sc >= C.match.minSamples
-        ? `<span class="tag ok">${sc} / ${C.match.maxSamples} ready</span>`
+        ? `<span class="tag ok">${sc} / ${C.match.maxSamples} ${isCloudOnly ? "cloud" : "ready"}</span>`
         : (sc > 0 ? `${sc} <span class="tag warn">below ${C.match.minSamples}</span>` : `<span class="muted">0</span>`);
-      return `<tr><td><div class="staffCell"><span class="avatarCircle">${esc(initials(s.name))}</span><div><b>${esc(s.name)}</b>${s.officialName ? `<br><small class="muted">${esc(s.officialName)}</small>` : ""}</div></div></td><td>${sampleBadge}</td><td>${s.pinhash ? `<span class="tag ok">yes</span>` : "—"}</td><td>${s.active === false ? `<span class="tag warn">no</span>` : "yes"}</td><td><button class="btn small" data-en="${s.id}">Enrol</button></td></tr>`;
+      return `<tr><td><div class="staffCell"><span class="avatarCircle">${esc(initials(s.name))}</span><div><b>${esc(s.name)}</b>${s.officialName ? `<br><small class="muted">${esc(s.officialName)}</small>` : ""}</div></div></td><td>${sampleBadge}</td><td>${hasStaffPin(s) ? `<span class="tag ok">yes</span>` : "—"}</td><td>${s.active === false ? `<span class="tag warn">no</span>` : "yes"}</td><td><button class="btn small" data-en="${s.id}">Enrol</button></td></tr>`;
     }).join("") || `<tr><td colspan="5" class="muted">Roster empty — refresh from the server.</td></tr>`;
     tb.querySelectorAll("button[data-en]").forEach(b => b.addEventListener("click", () => { showTab("enrol"); selectEnrol(b.dataset.en); }));
     DBX.getMeta("rosterAt", "").then(at => $("stInfo").textContent = at ? `roster refreshed ${new Date(at).toLocaleString()}` : "roster never refreshed");
@@ -1399,12 +1657,13 @@
     $("setDevice").value = await DBX.getMeta("device", "");
     $("setThreshold").value = state.threshold;
     $("setLive").checked = state.liveness;
+    if ($("setRedacted")) $("setRedacted").checked = state.redactedMode;
     if ($("setSound")) $("setSound").checked = state.sound;
     const pending = await DBX.unsyncedCount();
     const l = Sync.last;
     $("setInfo").textContent = [
       `version ${C.version} · face backend ${Face.backend} · detector ${Face.detector} · landmarks ${Face.landmarks} · models ${Face.ready ? "ready" : "loading"}`,
-      `roster ${state.staff.size} staff · ${state.faces.length} face samples on device · ${pending} punches pending`,
+      `roster ${state.staff.size} staff · ${state.faces.length} raw vectors on device · redacted 1:N ${state.redactedMode ? "ON" : "off"} · ${pending} punches pending`,
       `match threshold ${state.threshold} (default ${C.match.threshold}) · runner-up margin ${C.match.margin} · min face ${Math.round(C.match.minFaceFrac * 100)}% of frame · confirm ${C.match.confirmFrames} frames · liveness ${state.liveness ? "ON (blink)" : "off"}`,
       `online ${navigator.onLine} · last sync ${l.at ? l.at.toLocaleString() + " " + (l.ok === false ? "FAILED " : "") + l.msg : "never"}`,
       (ep => ep.url ? `API endpoint for ${(C.sites[state.site] || {}).name || state.site}: built in${ep.perSite ? " (site-specific key)" : ""}` : `⚠ no API endpoint for site ${state.site} — run scripts/att03_endpoints.py and redeploy`)(Sync.endpointFor(state.site)),
@@ -1412,15 +1671,60 @@
       state.defaultPin ? "⚠ manager PIN is the factory default — change it now" : "manager PIN set",
     ].join("\n");
   }
+  async function applyRedactedModeTransition(nextRedacted) {
+    const wasRedacted = state.redactedMode || !!(await DBX.getMeta("redactedMode", false));
+    if (nextRedacted) {
+      if (!navigator.onLine) {
+        await DBX.setMeta("redactedMode", false);
+        state.redactedMode = false;
+        if ($("setRedacted")) $("setRedacted").checked = false;
+        toast("Connect online first to sync and verify server 1:N support", true);
+        return { ok: false, error: "offline" };
+      }
+      const sr = await Sync.run("redact-enable");
+      if (sr && sr.ok === false) {
+        await DBX.setMeta("redactedMode", false);
+        state.redactedMode = false;
+        if ($("setRedacted")) $("setRedacted").checked = false;
+        toast("Sync failed; kept local biometrics (" + sr.msg + ")", true);
+        return { ok: false, error: "sync-failed" };
+      }
+      try {
+        const probeRes = await Sync.verify({ method: "face", descriptor: new Array(128).fill(0), threshold: state.threshold });
+        if (!probeRes || probeRes.ok !== true) throw new Error("verify-unsupported");
+      } catch (err) {
+        await DBX.setMeta("redactedMode", false);
+        state.redactedMode = false;
+        if ($("setRedacted")) $("setRedacted").checked = false;
+        toast("Server does not support 1:N redacted verify; local templates kept", true);
+        return { ok: false, error: "verify-unsupported" };
+      }
+      await DBX.setMeta("redactedMode", true);
+      await DBX.scrubLocalBiometrics();
+      state.redactedMode = true;
+      return { ok: true, redacted: true };
+    }
+    await DBX.setMeta("redactedMode", false);
+    state.redactedMode = false;
+    if (wasRedacted && navigator.onLine) {
+      await Sync.roster(true).catch(() => {});
+    }
+    return { ok: true, redacted: false };
+  }
+
   $("setSave").addEventListener("click", async () => {
     const siteChanged = $("setSite").value !== state.site;
+    const nextRedacted = $("setRedacted") ? $("setRedacted").checked : state.redactedMode;
     await DBX.setMeta("site", $("setSite").value);
     await DBX.setMeta("device", $("setDevice").value.trim());
     const t = parseFloat($("setThreshold").value);
     await DBX.setMeta("threshold", (t > 0.2 && t < 0.8) ? String(t) : "");
     await DBX.setMeta("liveness", $("setLive").checked);
     if ($("setSound")) await DBX.setMeta("sound", $("setSound").checked);
-    await loadData(); renderSettings(); toast("Settings saved");
+    const redRes = await applyRedactedModeTransition(nextRedacted);
+    await loadData();
+    renderSettings();
+    if (redRes.ok) toast("Settings saved");
     if (siteChanged) autoRoster(true);   // a new site = a new roster
   });
   // Pull the roster without anyone pressing a button: on boot when it is empty
@@ -1441,6 +1745,10 @@
   $("setFull").addEventListener("click", () => { const el = document.documentElement; (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el); });
   function calibrationReport() { return Face.calibration(usableFaces(), staffNames(), state.threshold); }
   $("setCalib").addEventListener("click", () => {
+    if (state.redactedMode && usableFaces().length === 0) {
+      $("calibOut").textContent = "Server-Redacted 1:N Mode is active (0 raw vectors stored on this tablet). Run calibration prior to scrubbing or on the server.";
+      return;
+    }
     const r = calibrationReport();
     const lines = [
       `${r.persons} people with usable enrolments · ${r.samples} samples · threshold ${r.threshold} · margin ${r.margin}`,
@@ -1477,7 +1785,11 @@
     await updateAttendanceAppBadge();
   }
   if ($("syncPill")) $("syncPill").addEventListener("click", async () => { toast("Syncing with server…"); const r = await Sync.run("manual"); toast(r.msg, r.ok === false); });
-  Sync.onChange(() => { updateSyncDot(); if (state.mgrOpen) renderSettings(); });
+  Sync.onChange(async () => {
+    if (state.redactedMode) await loadData();
+    updateSyncDot();
+    if (state.mgrOpen) renderSettings();
+  });
 
   // ---------- boot ----------
   function tickClock() {
@@ -1506,15 +1818,16 @@
     keepAwake();
     document.body.classList.remove("loading");
     if (modelErr) hint("Face models failed to load: " + (modelErr.message || modelErr), true);
-    else hint(usableFaces().length ? "Look at the camera" : "No enrolments yet — manager: ⚙");
+    else hint((usableFaces().length || (state.redactedMode && enrolledStaffCount() > 0)) ? "Look at the camera" : "No enrolments yet — manager: ⚙");
     state.running = true;
     loop();
     Sync.start();
     Sync.run("boot").catch(() => {});
     if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
-      navigator.serviceWorker.register("sw.js").catch(() => {});
+      const hadController = Boolean(navigator.serviceWorker.controller);
+      navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(() => {});
       let reloaded = false;
-      navigator.serviceWorker.addEventListener("controllerchange", () => { if (!reloaded && navigator.serviceWorker.controller) { reloaded = true; location.reload(); } });
+      navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController && !reloaded && navigator.serviceWorker.controller) { reloaded = true; location.reload(); } });
       navigator.serviceWorker.addEventListener("message", e => {
         const m = e && e.data;
         if (!m) return;
@@ -1524,27 +1837,35 @@
     }
   }
 
-  // ---------- test hooks (headless smoke only) ----------
-  window.ATT_TEST = {
-    state,
-    ready: () => Face.ready,
-    setFrameSource: el => { state.frameSource = el; },
-    seedStaff: async list => { await DBX.replaceStaff(list); await loadData(); },
-    descriptorsFromImage: async el => (await Face.detectAll(el)).map(r => ({ d: Array.from(r.descriptor), box: r.box, score: r.score, frac: r.frac })),
-    injectDescriptor: (d, src) => handleDescriptor(new Float32Array(d), src || null),
-    detectFrame: async src => { const det = await Face.detectOne(src); return det ? handleDetection(det, src) : { matched: false, reason: "no-face" }; },
-    selectEnrol, captureSample, saveEnrolment, renderLog, poseSvg, enrolFrame,
-    setEnrolConsent: v => { $("enConsent").checked = v; renderSamples(); },
-    setEnrolPin: async pin => { state.enrol.pin = { pin, hash: await sha256(pin) }; renderSamples(); },
-    setManagerPin, managerPinOk,
-    setLiveness: async v => { await DBX.setMeta("liveness", v); state.liveness = v; },
-    setLiveMock: fn => { state.liveMock = fn; },
-    calibration: calibrationReport,
-    keypad: Keypad,
-    punch, hideCard, loadData, openManager, closeManager, lastPunchRecent, recentPunches, startCamera, streamAlive,
-    computeAttendanceNotifs, updateAttendanceAppBadge, markAttNotifChecked, markAllAttNotifsChecked, pushAttNotif,
-    db: DBX, sync: Sync, face: Face,
-  };
+  // ---------- test hooks (strictly quarantined to automated WebDriver sessions) ----------
+  const IS_TEST_ENV = Boolean(navigator.webdriver);
+  if (IS_TEST_ENV) {
+    window.ATT_TEST = {
+      state,
+      ready: () => Face.ready,
+      setFrameSource: el => { state.frameSource = el; },
+      seedStaff: async list => { await DBX.replaceStaff(list); await loadData(); },
+      descriptorsFromImage: async el => (await Face.detectAll(el)).map(r => ({ d: Array.from(r.descriptor), box: r.box, score: r.score, frac: r.frac })),
+      injectDescriptor: (d, src) => handleDescriptor(Array.isArray(d) ? d : new Float32Array(d), src || null),
+      detectFrame: async src => { const det = await Face.detectOne(src); return det ? handleDetection(det, src) : { matched: false, reason: "no-face" }; },
+      selectEnrol, captureSample, saveEnrolment, renderLog, poseSvg, enrolFrame,
+      setEnrolConsent: v => { $("enConsent").checked = v; renderSamples(); },
+      setEnrolPin: async pin => { state.enrol.pin = { pin, hash: await sha256(pin) }; renderSamples(); },
+      setManagerPin, managerPinOk,
+      setLiveness: async v => { await DBX.setMeta("liveness", v); state.liveness = v; },
+      setRedactedMode: async v => {
+        const res = await applyRedactedModeTransition(!!v);
+        await loadData();
+        return res;
+      },
+      setLiveMock: fn => { state.liveMock = fn; },
+      calibration: calibrationReport,
+      keypad: Keypad,
+      punch, hideCard, loadData, openManager, closeManager, lastPunchRecent, recentPunches, startCamera, streamAlive,
+      computeAttendanceNotifs, updateAttendanceAppBadge, markAttNotifChecked, markAllAttNotifsChecked, pushAttNotif,
+      db: DBX, sync: Sync, face: Face,
+    };
+  }
 
   boot();
 })();

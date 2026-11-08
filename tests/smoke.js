@@ -4,8 +4,76 @@
 // replaced by injected frame sources (face crops from tests/faces/sample*.jpg);
 // the API is a mocked route that behaves like the Dataverse flow (upsert on id).
 
-const { chromium } = require("C:/Users/HusseinBdeir/bhfirms/codex-hub/node_modules/playwright-core");
-const BASE = process.env.ATT_BASE || "http://localhost:8090";
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+
+function loadPlaywright() {
+  const candidates = [
+    process.env.PLAYWRIGHT_CORE,
+    "C:/Users/hbdei/OneDrive - BHFIRMS/System/System/THEO/codex-hub-refinement/node_modules/playwright-core",
+    "C:/Users/HusseinBdeir/bhfirms/codex-hub/node_modules/playwright-core",
+    "playwright-core",
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try { return require(c); } catch (_) {}
+  }
+  throw new Error("playwright-core not found in candidate paths");
+}
+
+const { chromium } = loadPlaywright();
+const ROOT = path.resolve(__dirname, "..");
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+};
+
+function isValidVec128(v) {
+  if (!Array.isArray(v) || v.length !== 128) return false;
+  for (let i = 0; i < 128; i++) {
+    const n = Number(v[i]);
+    if (v[i] === null || v[i] === "" || typeof v[i] === "boolean" || !Number.isFinite(n)) return false;
+  }
+  return true;
+}
+
+function euclidean128(a, b) {
+  if (!isValidVec128(a) || !isValidVec128(b)) return 99;
+  let s = 0;
+  for (let i = 0; i < 128; i++) { const d = Number(a[i]) - Number(b[i]); s += d * d; }
+  const out = Math.sqrt(s);
+  return Number.isFinite(out) ? out : 99;
+}
+
+function startStaticServer() {
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, "http://127.0.0.1");
+    let rel = decodeURIComponent(u.pathname);
+    if (rel === "/") rel = "/index.html";
+    if (rel === "/js/endpoints.js" && !fs.existsSync(path.join(ROOT, "js", "endpoints.js"))) {
+      res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-cache" });
+      res.end("const ATT_ENDPOINTS = {};\n");
+      return;
+    }
+    const fp = path.resolve(ROOT, "." + rel);
+    if (!fp.startsWith(ROOT) || !fs.existsSync(fp) || fs.statSync(fp).isDirectory()) {
+      res.writeHead(404); res.end("Not found"); return;
+    }
+    const ext = path.extname(fp).toLowerCase();
+    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream", "Cache-Control": "no-cache" });
+    fs.createReadStream(fp).pipe(res);
+  });
+  return new Promise(resolve => {
+    srv.listen(0, "127.0.0.1", () => resolve({ srv, base: `http://127.0.0.1:${srv.address().port}` }));
+  });
+}
 
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
@@ -24,14 +92,16 @@ async function waitFor(page, fn, arg, timeout) {
 }
 
 (async () => {
+  const localSrv = process.env.ATT_BASE ? null : await startStaticServer();
+  const BASE = process.env.ATT_BASE || localSrv.base;
   const browser = await chromium.launch({
     channel: "chrome", headless: true,
     args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
   });
   const ctx = await browser.newContext({ permissions: ["camera"], viewport: { width: 1280, height: 800 } });
 
-  // ---- mock API (what the Power Automate flow will do) ----
-  const server = { punches: new Map(), faces: new Map(), calls: [], delayMs: 0 };
+  // ---- mock API (what the Power Automate flow / ISABI Edge endpoint will do) ----
+  const server = { punches: new Map(), faces: new Map(), calls: [], delayMs: 0, disableVerify: false };
   const roster = [
     { id: "11111111-1111-1111-1111-111111111111", name: "Alice A", officialName: "Alice Abbas" },
     { id: "22222222-2222-2222-2222-222222222222", name: "Bilal B", officialName: "Bilal Baz" },
@@ -43,14 +113,106 @@ async function waitFor(page, fn, arg, timeout) {
     if (server.delayMs) await sleep(server.delayMs);
     if (body.key !== "k") return route.fulfill({ status: 401, body: "bad key" });
     if (body.op === "roster") {
+      if (body.redact) {
+        const allF = [...server.faces.values()];
+        const staffOut = roster.map(s => {
+          const sf = allF.filter(f => f.staffId === s.id);
+          return {
+            id: s.id,
+            name: s.name,
+            officialName: s.officialName,
+            hasPin: sf.some(f => !!f.pinhash),
+            faceSamples: sf.filter(f => Array.isArray(f.descriptor) && f.descriptor.length === 128).length,
+          };
+        });
+        const facesOut = allF.map(f => ({
+          id: f.id,
+          staffId: f.staffId,
+          sample: f.sample || 0,
+          faceRedacted: Array.isArray(f.descriptor) && f.descriptor.length === 128,
+          hasPin: !!f.pinhash,
+          consentAt: f.consentAt || "",
+          ts: f.ts || "",
+        }));
+        return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, redacted: true, staff: staffOut, faces: facesOut }) });
+      }
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, staff: roster, faces: body.restore ? [...server.faces.values()] : [] }) });
     }
     if (body.op === "sync") {
       (body.punches || []).forEach(p => server.punches.set(p.id, p));
-      (body.faces || []).forEach(f => server.faces.set(f.id, f));
+      (body.faces || []).forEach(f => {
+        if (!f || !f.id) return;
+        const sid = f.staffId;
+        const samp = Number(f.sample || 0);
+        // Carry forward existing staff PIN hash when re-enrolling face poses without changing PIN
+        let effPinhash = f.pinhash || "";
+        if (!effPinhash && sid) {
+          for (const old of server.faces.values()) {
+            if (old.staffId === sid && old.pinhash) { effPinhash = old.pinhash; break; }
+          }
+        }
+        // Remove superseded server rows for the same (staffId, sample), or legacy random-ID face rows on sample=1
+        for (const [k, old] of [...server.faces.entries()]) {
+          if (old.staffId === sid && k !== f.id) {
+            if (Number(old.sample || 0) === samp || (samp === 1 && Number(old.sample || 0) > 0 && !String(k).startsWith(sid + ":"))) {
+              server.faces.delete(k);
+            }
+          }
+        }
+        server.faces.set(f.id, { ...f, pinhash: effPinhash });
+        // Propagate rotated PIN hash across all server rows for this staffId so revoked PINs never remain matchable
+        if (f.pinhash && sid) {
+          for (const [k, old] of server.faces.entries()) {
+            if (old.staffId === sid && old.pinhash !== f.pinhash) {
+              server.faces.set(k, { ...old, pinhash: f.pinhash, ts: f.ts || old.ts });
+            }
+          }
+        }
+      });
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, punches: (body.punches || []).map(p => p.id), faces: (body.faces || []).map(f => f.id) }) });
     }
-    route.fulfill({ status: 400, body: "bad op" });
+    if (body.op === "verify" && !server.disableVerify) {
+      if (body.method === "pin") {
+        const hit = [...server.faces.values()].find(f => f.pinhash && f.pinhash === body.pinhash);
+        if (!hit) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: false, reason: "bad-pin" }) });
+        return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: true, staffId: hit.staffId }) });
+      }
+      if (body.method === "face") {
+        const thr = typeof body.threshold === "number" ? body.threshold : 0.50;
+        const probe = body.descriptor;
+        if (!isValidVec128(probe)) {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: false, matched: false, reason: "bad-descriptor" }) });
+        }
+        const sampleCounts = new Map();
+        for (const f of server.faces.values()) {
+          if (Array.isArray(f.descriptor) && f.descriptor.length === 128) {
+            sampleCounts.set(f.staffId, (sampleCounts.get(f.staffId) || 0) + 1);
+          }
+        }
+        const usable = [...server.faces.values()].filter(f => Array.isArray(f.descriptor) && f.descriptor.length === 128 && (sampleCounts.get(f.staffId) || 0) >= 3);
+        if (!usable.length) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: false, reason: "no-enrolments" }) });
+        let best = null, second = null;
+        for (const f of usable) {
+          const dist = euclidean128(probe, f.descriptor);
+          if (!Number.isFinite(dist) || dist >= 99) continue;
+          if (!best || dist < best.dist) {
+            if (best && best.staffId !== f.staffId) second = best;
+            best = { staffId: f.staffId, dist };
+          } else if (f.staffId !== best.staffId && (!second || dist < second.dist)) {
+            second = { staffId: f.staffId, dist };
+          }
+        }
+        // Strictly zero distance / face_dist returned to kiosk client
+        if (!best || !Number.isFinite(best.dist) || best.dist > thr) {
+          return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: false, reason: "far" }) });
+        }
+        if (second && (!Number.isFinite(second.dist - best.dist) || (second.dist - best.dist) < 0.08)) {
+          return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: false, reason: "ambiguous" }) });
+        }
+        return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: true, staffId: best.staffId, weak: best.dist > 0.45 }) });
+      }
+    }
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: false, error: "bad op" }) });
   });
 
   const page = await ctx.newPage();
@@ -489,8 +651,265 @@ async function waitFor(page, fn, arg, timeout) {
     badgeTest.afterCheck.count === 0 && badgeTest.afterCheck.hidden === true,
     badgeTest);
 
+  console.log("19. v0.4.0 Server-Redacted 1:N Biometric & PIN Mode (0 local vectors/pinhashes + rival margin reject + 0 oracle leak)");
+  await page.evaluate(() => ATT_TEST.setFrameSource(null));
+  await page.evaluate(() => ATT_TEST.setLiveness(false));
+
+  // NEGATIVE: if server does not support op:"verify", enabling redactedMode MUST keep local vectors intact
+  server.disableVerify = true;
+  const blockedRedact = await page.evaluate(() => ATT_TEST.setRedactedMode(true));
+  const keptBeforeSupport = await page.evaluate(() => ATT_TEST.state.faces.length);
+  check("NEGATIVE: enabling redactedMode against unsupported server keeps local 128-d vectors intact",
+    blockedRedact.ok === false && keptBeforeSupport >= 3, { blockedRedact, keptBeforeSupport });
+  server.disableVerify = false;
+
+  await page.evaluate(() => ATT_TEST.setRedactedMode(true));
+
+  const scrubCheck = await page.evaluate(async () => {
+    const dbFaces = await ATT_TEST.db.allFaces();
+    const dbStaff = await ATT_TEST.db.allStaff();
+    const hasRawDesc = dbFaces.some(f => Array.isArray(f.d) && f.d.length > 0);
+    const hasRawFacePin = dbFaces.some(f => !!f.pinhash);
+    const hasRawStaffPin = dbStaff.some(s => !!s.pinhash);
+    return {
+      memFaces: ATT_TEST.state.faces.length,
+      hasRawDesc,
+      hasRawFacePin,
+      hasRawStaffPin,
+      redactedStubs: dbFaces.filter(f => f.faceRedacted).length,
+      bilalRedactedPin: !!(dbStaff.find(s => s.id.startsWith("2222")) || {}).pinRedacted,
+    };
+  });
+  check("redactedMode scrubs 100% of raw 128-d vectors & pinhashes from IndexedDB and RAM",
+    scrubCheck.memFaces === 0 && !scrubCheck.hasRawDesc && !scrubCheck.hasRawFacePin && !scrubCheck.hasRawStaffPin && scrubCheck.redactedStubs >= 3 && scrubCheck.bilalRedactedPin,
+    scrubCheck);
+
+  // Backdate Alice's & Bilal's punches past debounce window so live redacted punches record cleanly
+  await page.evaluate(async d => {
+    for (const p of await ATT_TEST.db.punchesForDay(d)) {
+      p.ts = new Date(Date.now() - 10 * 60000).toISOString();
+      await ATT_TEST.db.savePunch(p);
+    }
+    ATT_TEST.state.lastPunchAt.clear();
+  }, day);
+
+  const aliceProbe = [...server.faces.values()].find(f => f.staffId.startsWith("1111") && f.descriptor.length === 128).descriptor;
+  const redVerifyRes = await page.evaluate(async d => {
+    ATT_TEST.state.redactedStreak = [];
+    let res = null;
+    for (let i = 0; i < 3; i++) res = await ATT_TEST.injectDescriptor(d);
+    return res;
+  }, aliceProbe);
+  check("Server-Redacted 1:N face verify clocks Alice with 0 local face vectors",
+    redVerifyRes && redVerifyRes.matched === true && redVerifyRes.redacted === true && redVerifyRes.staffId.startsWith("1111"),
+    redVerifyRes);
+  await page.evaluate(() => ATT_TEST.hideCard());
+
+  // Inject ambiguous twin rival (3 samples at distance 0.03 < 0.08 margin from Alice) and verify hard reject + zero oracle leak
+  for (let s = 1; s <= 3; s++) {
+    const twinDesc = aliceProbe.map((v, idx) => idx === 0 ? v + 0.03 : v);
+    server.faces.set("twin-" + s, { id: "twin-" + s, staffId: "33333333-3333-3333-3333-333333333333", sample: s, descriptor: twinDesc, pinhash: "" });
+  }
+  const ambRes = await page.evaluate(async d => {
+    ATT_TEST.state.redactedStreak = [];
+    let res = null;
+    for (let i = 0; i < 3; i++) res = await ATT_TEST.injectDescriptor(d);
+    return res;
+  }, aliceProbe);
+  const rawVerifyOracle = await page.evaluate(d => ATT_TEST.sync.verify({ method: "face", descriptor: d, threshold: 0.5 }), aliceProbe);
+  check("NEGATIVE: ambiguous rival (< 0.08 margin) HARD REJECTED in redacted mode with zero distance/face_dist oracle",
+    ambRes && ambRes.matched === false && ambRes.reason === "ambiguous" && !("distance" in ambRes) &&
+    rawVerifyOracle.matched === false && rawVerifyOracle.reason === "ambiguous" && !("distance" in rawVerifyOracle) && !("face_dist" in rawVerifyOracle),
+    { ambRes, rawVerifyOracle });
+  for (let s = 1; s <= 3; s++) server.faces.delete("twin-" + s);
+
+  // NEGATIVE: wrong PIN ("9876") rejected in redacted mode (keypad stays open)
+  await page.click("#btnPin");
+  for (const k of ["9", "8", "7", "6"]) await page.click(`#keypad button[data-k="${k}"]`);
+  await sleep(550);
+  check("NEGATIVE: wrong PIN rejected in Server-Redacted mode (keypad stays open)",
+    await page.evaluate(() => document.getElementById("keypad").classList.contains("open")) === true);
+
+  // Verify redacted PIN punch for Bilal ("1234") with 0 local pinhash
+  for (const k of ["1", "2", "3", "4"]) await page.click(`#keypad button[data-k="${k}"]`);
+  await sleep(600);
+  check("Server-Redacted PIN verify clocks Bilal with 0 local pinhash",
+    !(await page.evaluate(() => document.getElementById("keypad").classList.contains("open"))) &&
+    (await page.textContent("#cardName")) === "Bilal B");
+  await page.evaluate(() => ATT_TEST.hideCard());
+
+  // Wipe local faces and pull roster(restore=true) in redactedMode -> must restore 0 raw vectors
+  const redRestore = await page.evaluate(async () => {
+    for (const f of await ATT_TEST.db.allFaces()) await ATT_TEST.db.deleteFace(f.id);
+    const r = await ATT_TEST.sync.roster(true);
+    await ATT_TEST.loadData();
+    const dbFaces = await ATT_TEST.db.allFaces();
+    const dbStaff = await ATT_TEST.db.allStaff();
+    return {
+      r,
+      hasRawDesc: dbFaces.some(f => Array.isArray(f.d) && f.d.length > 0),
+      hasRawPin: dbStaff.some(s => !!s.pinhash) || dbFaces.some(f => !!f.pinhash),
+      stubs: dbFaces.filter(f => f.faceRedacted).length,
+    };
+  });
+  check("redacted roster(restore=true) restores metadata stubs with 0 raw 128-d vectors or pinhashes",
+    redRestore.r.redacted === true && redRestore.r.restored === 3 && !redRestore.hasRawDesc && !redRestore.hasRawPin && redRestore.stubs === 3,
+    redRestore);
+
+  // NEGATIVE: NaN / non-numeric 128-d descriptor rejected by Face.decide, injectDescriptor, and Sync.verify
+  const attNanCheck = await page.evaluate(async () => {
+    const nanVec = new Array(128).fill(0); nanVec[0] = NaN;
+    const strVec = new Array(128).fill(0); strVec[0] = "NaN";
+    const localM = ATT_TEST.face.match(nanVec, [{ staffId: "11111111-1111-1111-1111-111111111111", d: new Array(128).fill(0.1) }]);
+    const localDec = ATT_TEST.face.decide(localM, 0.5);
+    const inj = await ATT_TEST.injectDescriptor(nanVec);
+    let srvRejected = false;
+    try {
+      const sv = await ATT_TEST.sync.verify({ method: "face", descriptor: strVec, threshold: 0.5 });
+      srvRejected = !sv || sv.matched !== true;
+    } catch (_) {
+      srvRejected = true;
+    }
+    return { localM, localDec, inj, srvRejected };
+  });
+  check("NEGATIVE: NaN / non-numeric 128-d descriptor HARD REJECTED locally and on server verify",
+    attNanCheck.localM === null && attNanCheck.localDec.ok === false && attNanCheck.inj.matched === false && attNanCheck.srvRejected === true,
+    attNanCheck);
+
+  // NEGATIVE: duplicate staff PIN in redactedMode rejected on #enPin (Carla cannot claim Bilal's redacted PIN "1234")
+  await page.evaluate(() => {
+    ATT_TEST.openManager();
+    ATT_TEST.selectEnrol("33333333-3333-3333-3333-333333333333");
+  });
+  await page.click('#mgr button[data-tab="enrol"]');
+  await page.click("#enPin");
+  for (const k of ["1", "2", "3", "4"]) await page.click(`#keypad button[data-k="${k}"]`);
+  await sleep(550);
+  check("NEGATIVE: duplicate staff PIN in redactedMode rejected on #enPin (keypad stays open)",
+    await page.evaluate(() => document.getElementById("keypad").classList.contains("open") && ATT_TEST.state.enrol.pin === null));
+  await page.click('#keypad button[data-k="x"]');
+  await page.evaluate(() => ATT_TEST.closeManager());
+
+  // Mixed local + server-redacted coexist check: unsynced local enrolment for Carla does NOT lock out redacted Alice
+  await page.evaluate(async d => {
+    for (const p of await ATT_TEST.db.punchesForDay(d)) {
+      p.ts = new Date(Date.now() - 10 * 60000).toISOString();
+      await ATT_TEST.db.savePunch(p);
+    }
+    ATT_TEST.state.lastPunchAt.clear();
+    // Seed 3 unsynced local vectors for Carla (distinct orthogonal vector)
+    const carlaVec = new Array(128).fill(0); carlaVec[10] = 2.0;
+    for (let s = 1; s <= 3; s++) {
+      await ATT_TEST.db.saveFace({ id: "carla-local-" + s, staffId: "33333333-3333-3333-3333-333333333333", d: carlaVec, sample: s, synced: 0 });
+    }
+    await ATT_TEST.loadData();
+  }, day);
+  const mixedAlice = await page.evaluate(async d => {
+    ATT_TEST.state.redactedStreak = [];
+    let res = null;
+    for (let i = 0; i < 3; i++) res = await ATT_TEST.injectDescriptor(d);
+    return { usableCount: ATT_TEST.state.faces.length, res };
+  }, aliceProbe);
+  check("mixed local + redacted: redacted Alice still clocks via server 1:N while Carla holds unsynced local samples",
+    mixedAlice.usableCount === 3 && mixedAlice.res && mixedAlice.res.matched === true && mixedAlice.res.staffId.startsWith("1111"),
+    mixedAlice);
+  await page.evaluate(async () => {
+    ATT_TEST.hideCard();
+    for (let s = 1; s <= 3; s++) await ATT_TEST.db.deleteFace("carla-local-" + s);
+    await ATT_TEST.sync.run("cleanup");
+    await ATT_TEST.loadData();
+  });
+  for (let s = 1; s <= 3; s++) server.faces.delete("carla-local-" + s);
+
+  // NEGATIVE: deactivated staff (`active: false`) REJECTED on redacted Face ID verify
+  const inactiveRedacted = await page.evaluate(async d => {
+    const alice = ATT_TEST.state.staff.get("11111111-1111-1111-1111-111111111111");
+    alice.active = false;
+    ATT_TEST.state.redactedStreak = [];
+    let res = null;
+    for (let i = 0; i < 3; i++) res = await ATT_TEST.injectDescriptor(d);
+    alice.active = true;
+    return res;
+  }, aliceProbe);
+  check("NEGATIVE: deactivated staff (active: false) REJECTED on redacted Face ID verify",
+    inactiveRedacted && inactiveRedacted.matched === false && inactiveRedacted.reason === "inactive",
+    inactiveRedacted);
+
+  // PIN-only save on redacted Alice preserves her 3 redacted Face ID stubs, and rotating Bilal's PIN ("1234" -> "5678") revokes "1234"
+  await page.evaluate(() => {
+    ATT_TEST.openManager();
+    ATT_TEST.selectEnrol("11111111-1111-1111-1111-111111111111");
+  });
+  await page.click('#mgr button[data-tab="enrol"]');
+  await page.click("#enPin");
+  for (const k of ["2", "4", "6", "8"]) await page.click(`#keypad button[data-k="${k}"]`);
+  await sleep(250);
+  await page.click("#enSave");
+  await sleep(300);
+  const aliceAfterPin = await page.evaluate(async () => {
+    await ATT_TEST.sync.run("alice-pin");
+    await ATT_TEST.loadData();
+    const stubs = await ATT_TEST.db.facesForStaff("11111111-1111-1111-1111-111111111111");
+    return { faceStubCount: stubs.filter(f => f.faceRedacted).length };
+  });
+  check("PIN-only save on redacted Alice preserves all 3 redacted Face ID stubs",
+    aliceAfterPin.faceStubCount === 3,
+    aliceAfterPin);
+
+  // Rotate Bilal's PIN ("1234" -> "5678") while in redactedMode, sync + scrub, verify revoked "1234" REJECTED & new "5678" accepted
+  await page.evaluate(async d => {
+    for (const p of await ATT_TEST.db.punchesForDay(d)) {
+      p.ts = new Date(Date.now() - 10 * 60000).toISOString();
+      await ATT_TEST.db.savePunch(p);
+    }
+    ATT_TEST.state.lastPunchAt.clear();
+    ATT_TEST.selectEnrol("22222222-2222-2222-2222-222222222222");
+  }, day);
+  await page.click("#enPin");
+  for (const k of ["5", "6", "7", "8"]) await page.click(`#keypad button[data-k="${k}"]`);
+  await sleep(250);
+  await page.click("#enSave");
+  await sleep(300);
+  await page.evaluate(async () => {
+    await ATT_TEST.sync.run("bilal-rotate");
+    await ATT_TEST.loadData();
+    ATT_TEST.closeManager();
+  });
+  await page.click("#btnPin");
+  for (const k of ["1", "2", "3", "4"]) await page.click(`#keypad button[data-k="${k}"]`);
+  await sleep(550);
+  check("NEGATIVE: revoked PIN 1234 REJECTED on #keypad after Bilal rotated to 5678 in redactedMode",
+    await page.evaluate(() => document.getElementById("keypad").classList.contains("open") && document.getElementById("card").classList.contains("hidden")));
+  for (const k of ["5", "6", "7", "8"]) await page.click(`#keypad button[data-k="${k}"]`);
+  await sleep(600);
+  check("rotated PIN 5678 clocks Bilal IN via Server-Redacted verify",
+    !(await page.evaluate(() => document.getElementById("keypad").classList.contains("open"))) &&
+    (await page.textContent("#cardName")).includes("Bilal"));
+  await page.evaluate(() => ATT_TEST.hideCard());
+
+  // Toggling redactedMode true -> false restores full 128-d vectors & rotated pinhash ("5678", NOT revoked "1234") from server
+  const unredactRes = await page.evaluate(async () => {
+    const tr = await ATT_TEST.setRedactedMode(false);
+    const dbFaces = await ATT_TEST.db.allFaces();
+    const bilal = await ATT_TEST.db.getStaff("22222222-2222-2222-2222-222222222222");
+    const enc = new TextEncoder().encode("5678");
+    const dig = await crypto.subtle.digest("SHA-256", enc);
+    const expectedHash = Array.from(new Uint8Array(dig)).map(b => b.toString(16).padStart(2, "0")).join("");
+    return {
+      tr,
+      memFaces: ATT_TEST.state.faces.length,
+      dbVectors: dbFaces.filter(f => Array.isArray(f.d) && f.d.length === 128).length,
+      bilalHasLocalHash: !!(bilal && bilal.pinhash && !bilal.pinRedacted),
+      bilalMatchesRotated5678: !!(bilal && bilal.pinhash === expectedHash),
+    };
+  });
+  check("toggling redactedMode true -> false restores full 128-d vectors & rotated pinhash (5678) from server",
+    unredactRes.tr.ok === true && unredactRes.memFaces === 3 && unredactRes.dbVectors === 3 && unredactRes.bilalHasLocalHash === true && unredactRes.bilalMatchesRotated5678 === true,
+    unredactRes);
+
   check("no page errors", errors.length === 0, errors);
   console.log(`\n${pass} passed, ${fail} failed`);
   await browser.close();
+  if (localSrv) localSrv.srv.close();
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(2); });

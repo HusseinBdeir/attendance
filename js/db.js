@@ -103,14 +103,88 @@ const DBX = {
   unsyncedFaces(limit) {
     return cursorAll("faces", "synced", IDBKeyRange.only(0)).then(r => r.slice(0, limit || 1e9));
   },
-  markFacesSynced(ids) {
+  markFacesSynced(ids, opts) {
+    const scrub = !!(opts && opts.scrubLocal);
     return openDB().then(db => new Promise((resolve, reject) => {
-      const t = db.transaction("faces", "readwrite");
+      const t = db.transaction(["faces", "staff"], "readwrite");
       const s = t.objectStore("faces");
+      const stStore = t.objectStore("staff");
       ids.forEach(id => {
         const g = s.get(id);
-        g.onsuccess = () => { if (g.result) { g.result.synced = 1; s.put(g.result); } };
+        g.onsuccess = () => {
+          const r = g.result;
+          if (!r) return;
+          r.synced = 1;
+          if (scrub) {
+            if (Array.isArray(r.d) && r.d.length === 128) {
+              delete r.d;
+              r.faceRedacted = true;
+            }
+            if (r.pinhash) {
+              delete r.pinhash;
+              r.pinRedacted = true;
+              if (r.staffId) {
+                const sg = stStore.get(r.staffId);
+                sg.onsuccess = () => {
+                  const st = sg.result;
+                  if (st) {
+                    st.hasPin = true;
+                    st.pinRedacted = true;
+                    delete st.pinhash;
+                    stStore.put(st);
+                  }
+                };
+              }
+            }
+          }
+          s.put(r);
+        };
       });
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    }));
+  },
+
+  scrubLocalBiometrics() {
+    return openDB().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction(["faces", "staff"], "readwrite");
+      const fs = t.objectStore("faces");
+      const ss = t.objectStore("staff");
+      const unsyncedStaff = new Set();
+      const allF = fs.getAll();
+      allF.onsuccess = () => {
+        const rows = allF.result || [];
+        rows.forEach(r => {
+          if (!r.synced) {
+            if (r.staffId) unsyncedStaff.add(r.staffId);
+            return;
+          }
+          let dirty = false;
+          if (Array.isArray(r.d) && r.d.length > 0) {
+            r.faceRedacted = r.d.length === 128 || !!r.faceRedacted;
+            delete r.d;
+            dirty = true;
+          }
+          if (r.pinhash) {
+            r.pinRedacted = true;
+            delete r.pinhash;
+            dirty = true;
+          }
+          if (dirty) fs.put(r);
+        });
+        const allS = ss.getAll();
+        allS.onsuccess = () => {
+          (allS.result || []).forEach(st => {
+            if (unsyncedStaff.has(st.id)) return;
+            if (st.pinhash) {
+              st.hasPin = true;
+              st.pinRedacted = true;
+              delete st.pinhash;
+              ss.put(st);
+            }
+          });
+        };
+      };
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
     }));

@@ -1,18 +1,18 @@
 // BHFIRMS Attendance kiosk — service worker (v0.3.4): cache-first app shell + models,
 // Web Push + Home Screen Badging API (navigator.setAppBadge) + shared unread notification cache.
 // Bump CACHE AND the ?v= strings in index.html on every deploy (they must match — see PWA.md).
-const CACHE = "bhfatt-v0.3.6";
+const CACHE = "bhfatt-v0.4.0";
 const NOTIF_CACHE = "bhfatt-notif-v1";
 const UNREAD_NOTIFS_URL = "./__att_unread_notifs.json";
 const SHELL = [
   "./",
   "./index.html",
-  "./css/att.css?v=0.3.6",
-  "./js/config.js?v=0.3.6",
-  "./js/db.js?v=0.3.6",
-  "./js/face.js?v=0.3.6",
-  "./js/sync.js?v=0.3.6",
-  "./js/app.js?v=0.3.6",
+  "./css/att.css?v=0.4.0",
+  "./js/config.js?v=0.4.0",
+  "./js/db.js?v=0.4.0",
+  "./js/face.js?v=0.4.0",
+  "./js/sync.js?v=0.4.0",
+  "./js/app.js?v=0.4.0",
   "./vendor/face-api.js",
   "./vendor/models/tiny_face_detector_model-weights_manifest.json",
   "./vendor/models/tiny_face_detector_model.bin",
@@ -25,12 +25,12 @@ const SHELL = [
   "./vendor/models/face_recognition_model-weights_manifest.json",
   "./vendor/models/face_recognition_model.bin",
   "./brand/isabi-header.svg",
-  "./manifest.webmanifest",
-  "./icon.svg",
-  "./icon-180.png",
-  "./icon-192.png",
-  "./icon-512.png",
-  "./icon-512-maskable.png",
+  "./manifest.webmanifest?v=0.4.0",
+  "./icon.svg?v=0.4.0",
+  "./icon-180.png?v=0.4.0",
+  "./icon-192.png?v=0.4.0",
+  "./icon-512.png?v=0.4.0",
+  "./icon-512-maskable.png?v=0.4.0",
 ];
 
 function applySwAppBadge(count) {
@@ -97,12 +97,38 @@ self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
   if (url.origin !== self.location.origin) return;      // never cache the API host
   if (url.pathname.endsWith("__att_unread_notifs.json")) return;
+
+  if (e.request.mode === "navigate") {
+    e.respondWith((async () => {
+      try {
+        let res = await fetch(e.request);
+        if (res && res.status === 200) {
+          if (res.redirected) {
+            const body = await res.blob();
+            res = new Response(body, {
+              status: 200,
+              headers: { "Content-Type": res.headers.get("Content-Type") || "text/html; charset=utf-8" },
+            });
+          }
+          const copy = res.clone();
+          caches.open(CACHE).then(c => c.put("./index.html", copy)).catch(() => {});
+        }
+        return res;
+      } catch (_) {
+        return (await caches.match("./index.html")) || (await caches.match("./"));
+      }
+    })());
+    return;
+  }
+
   e.respondWith(
     caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
-      const copy = res.clone();
-      caches.open(CACHE).then(c => c.put(e.request, copy));
+      if (res && res.status === 200 && !res.redirected) {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+      }
       return res;
-    }))
+    }).catch(() => caches.match(e.request, { ignoreSearch: true })))
   );
 });
 

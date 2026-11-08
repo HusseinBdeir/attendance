@@ -6,12 +6,15 @@ trigger URL carries its own SAS signature AND the body carries a shared key
 Dataverse token ever sits on a gate device.
 
 Body (always): {key, op, site, siteBu, device, version, ...}
-  op = "roster"  {restore: bool}            -> {ok, staff:[{id,name,officialName}], faces:[...], serverTime}
-                 staff = active employments of the site BU (end date blank or future), expanded to staffmember
+  op = "roster"  {restore: bool, redact?: bool} -> {ok, staff:[{id,name,officialName,hasPin?}], faces:[...], redacted?: bool, serverTime}
+                 staff = active employments of the site BU (end date blank or future), expanded to staffmember;
+                 when redact=true, descriptor & pinhash are stripped and replaced with faceRedacted/hasPin flags.
   op = "sync"    {punches:[...], faces:[...]} -> {ok, punches:[ids], faces:[ids], serverTime}
                  upsert on bhf_sourceref (= kiosk uuid): existing punch -> direction/notes updated,
                  existing enrolment -> descriptor/pinhash updated; new rows created BU-owned;
                  snapshot written to the image column in a second step whose failure is absorbed.
+  op = "verify"  {method: "face"|"pin", descriptor?: number[128], pinhash?: string, threshold?: number}
+                 supported by ISABI Edge/server (/app/api/kiosk/verify) for redacted 1:N tablets (0 distance oracle).
 
 Phases (one at a time):
   --phases p   write exports/att02_flow_payload.json (create the skeleton via MCP create_record workflow)
@@ -111,7 +114,7 @@ def clientdata(key):
         "entityName": "bhf_faceenrolments",
         "recordId": "@first(outputs('Find_Face')?['body/value'])?['bhf_faceenrolmentid']",
         "item/bhf_descriptor": f"@string(coalesce({F}?['descriptor'], json('[]')))",
-        "item/bhf_pinhash": f"@{F}?['pinhash']",
+        "item/bhf_pinhash": f"@if(empty({F}?['pinhash']), first(outputs('Find_Face')?['body/value'])?['bhf_pinhash'], {F}?['pinhash'])",
     }
 
     definition = {
@@ -123,7 +126,10 @@ def clientdata(key):
                                 "inputs": {"schema": {"type": "object", "properties": {
                                     "key": {"type": "string"}, "op": {"type": "string"}, "site": {"type": "string"},
                                     "siteBu": {"type": "string"}, "device": {"type": "string"}, "version": {"type": "string"},
-                                    "restore": {"type": "boolean"}, "punches": {"type": "array"}, "faces": {"type": "array"}}}}}},
+                                    "restore": {"type": "boolean"}, "redact": {"type": "boolean"},
+                                    "method": {"type": "string"}, "pinhash": {"type": "string"},
+                                    "descriptor": {"type": "array"}, "threshold": {"type": "number"},
+                                    "punches": {"type": "array"}, "faces": {"type": "array"}}}}}},
         "actions": {
             "Bad_Key": {
                 "type": "If", "runAfter": {},
@@ -164,20 +170,45 @@ def clientdata(key):
                             "entityName": "bhf_faceenrolments",
                             "$select": "bhf_faceenrolmentid,bhf_sourceref,_bhf_staff_value,bhf_sample,bhf_descriptor,bhf_consenton,bhf_pinhash,createdon",
                             "$filter": "@concat('_owningbusinessunit_value eq ', outputs('BU_Id'), ' and statecode eq 0')",
-                            "$top": "@if(equals(triggerBody()?['restore'], true), 5000, 1)"},
+                            "$top": "@if(or(equals(triggerBody()?['restore'], true), equals(triggerBody()?['redact'], true)), 5000, 1)"},
                             {"Select_Staff": ["Succeeded"]}),
                         "Select_Faces": {"type": "Select", "runAfter": {"List_Faces": ["Succeeded"]},
                                          "inputs": {"from": "@outputs('List_Faces')?['body/value']",
                                                     "select": {"id": "@item()?['bhf_sourceref']", "staffId": "@item()?['_bhf_staff_value']",
                                                                "sample": "@item()?['bhf_sample']",
-                                                               "descriptor": "@json(coalesce(item()?['bhf_descriptor'], '[]'))",
-                                                               "consentAt": "@item()?['bhf_consenton']", "pinhash": "@item()?['bhf_pinhash']",
+                                                               "faceRedacted": "@and(equals(triggerBody()?['redact'], true), greater(int(coalesce(item()?['bhf_sample'], 0)), 0))",
+                                                               "hasPin": "@not(empty(item()?['bhf_pinhash']))",
+                                                               "descriptor": "@if(equals(triggerBody()?['redact'], true), json('[]'), json(coalesce(item()?['bhf_descriptor'], '[]')))",
+                                                               "consentAt": "@item()?['bhf_consenton']",
+                                                               "pinhash": "@if(equals(triggerBody()?['redact'], true), '', item()?['bhf_pinhash'])",
                                                                "ts": "@item()?['createdon']"}}},
                         "Response_Roster": response(200, {
                             "ok": True, "site": "@triggerBody()?['siteBu']", "bu": "@outputs('BU_Id')",
+                            "redacted": "@equals(triggerBody()?['redact'], true)",
                             "staff": "@body('Select_Staff')",
-                            "faces": "@if(equals(triggerBody()?['restore'], true), body('Select_Faces'), json('[]'))",
+                            "faces": "@if(or(equals(triggerBody()?['restore'], true), equals(triggerBody()?['redact'], true)), body('Select_Faces'), json('[]'))",
                             "serverTime": "@utcNow()"}, {"Select_Faces": ["Succeeded"]})}},
+                    "verify": {"case": "verify", "actions": {
+                        "If_Pin_Verify": {
+                            "type": "If", "runAfter": {},
+                            "expression": {"equals": ["@triggerBody()?['method']", "pin"]},
+                            "actions": {
+                                "Find_Pin_Face": act("ListRecords", {
+                                    "entityName": "bhf_faceenrolments",
+                                    "$select": "bhf_faceenrolmentid,_bhf_staff_value",
+                                    "$filter": "@concat('_owningbusinessunit_value eq ', outputs('BU_Id'), ' and statecode eq 0 and bhf_pinhash eq ''', replace(coalesce(triggerBody()?['pinhash'], ''), '''', ''''''), '''')",
+                                    "$top": 1}),
+                                "Response_Pin_Verify": response(200, {
+                                    "ok": True,
+                                    "matched": "@greater(length(outputs('Find_Pin_Face')?['body/value']), 0)",
+                                    "staffId": "@first(outputs('Find_Pin_Face')?['body/value'])?['_bhf_staff_value']",
+                                    "reason": "@if(greater(length(outputs('Find_Pin_Face')?['body/value']), 0), '', 'bad-pin')"
+                                }, {"Find_Pin_Face": ["Succeeded"]})},
+                            "else": {"actions": {
+                                "Response_Face_Unsupported": response(400, {
+                                    "ok": False,
+                                    "error": "face-verify-requires-isabi-edge"
+                                })}}}}},
                     "sync": {"case": "sync", "actions": {
                         "Foreach_Punch": {
                             "type": "Foreach", "runAfter": {},
@@ -208,13 +239,32 @@ def clientdata(key):
                             "foreach": "@coalesce(triggerBody()?['faces'], json('[]'))",
                             "runtimeConfiguration": {"concurrency": {"repetitions": 1}},
                             "actions": {
-                                "Find_Face": act("ListRecords", {"entityName": "bhf_faceenrolments", "$select": "bhf_faceenrolmentid",
+                                "Find_Face": act("ListRecords", {"entityName": "bhf_faceenrolments", "$select": "bhf_faceenrolmentid,bhf_pinhash",
                                                                  "$filter": f"@concat('bhf_sourceref eq ''', {F}?['id'], '''')", "$top": 1}),
                                 "If_Face_Exists": {
                                     "type": "If", "runAfter": {"Find_Face": ["Succeeded"]},
                                     "expression": {"greater": ["@length(outputs('Find_Face')?['body/value'])", 0]},
                                     "actions": {"Update_Face": act("UpdateRecord", update_face)},
-                                    "else": {"actions": {"Create_Face": act("CreateRecord", create_face)}}}}},
+                                    "else": {"actions": {"Create_Face": act("CreateRecord", create_face)}}},
+                                "If_Pin_Changed": {
+                                    "type": "If", "runAfter": {"If_Face_Exists": ["Succeeded"]},
+                                    "expression": {"not": {"empty": [f"@{F}?['pinhash']"]}},
+                                    "actions": {
+                                        "List_Old_Pins": act("ListRecords", {
+                                            "entityName": "bhf_faceenrolments",
+                                            "$select": "bhf_faceenrolmentid",
+                                            "$filter": f"@concat('_bhf_staff_value eq ', {F}?['staffId'], ' and statecode eq 0 and bhf_pinhash ne ''', replace({F}?['pinhash'], '''', ''''''), '''')",
+                                            "$top": 50}),
+                                        "Foreach_Old_Pin": {
+                                            "type": "Foreach", "runAfter": {"List_Old_Pins": ["Succeeded"]},
+                                            "foreach": "@outputs('List_Old_Pins')?['body/value']",
+                                            "runtimeConfiguration": {"concurrency": {"repetitions": 1}},
+                                            "actions": {
+                                                "Update_Old_Pin": act("UpdateRecord", {
+                                                    "entityName": "bhf_faceenrolments",
+                                                    "recordId": "@items('Foreach_Old_Pin')?['bhf_faceenrolmentid']",
+                                                    "item/bhf_pinhash": f"@{F}?['pinhash']"})}}},
+                                    "else": {"actions": {}}}}},
                         "Select_PunchIds": {"type": "Select", "runAfter": {"Foreach_Face": ["Succeeded"]},
                                             "inputs": {"from": "@coalesce(triggerBody()?['punches'], json('[]'))", "select": "@item()?['id']"}},
                         "Select_FaceIds": {"type": "Select", "runAfter": {"Select_PunchIds": ["Succeeded"]},

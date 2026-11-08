@@ -211,12 +211,35 @@ const Face = (() => {
     return (one(36) + one(42)) / 2;
   }
 
+  function isFiniteVec128(v) {
+    if (!v || v.length !== 128) return false;
+    for (let i = 0; i < 128; i++) {
+      const n = Number(v[i]);
+      if (v[i] === null || v[i] === "" || typeof v[i] === "boolean" || !Number.isFinite(n)) return false;
+    }
+    return true;
+  }
+
+  function safeEuclidean128(a, b) {
+    if (!isFiniteVec128(a) || !isFiniteVec128(b)) return 99;
+    let s = 0;
+    for (let i = 0; i < 128; i++) {
+      const d = Number(a[i]) - Number(b[i]);
+      s += d * d;
+    }
+    const out = Math.sqrt(s);
+    return Number.isFinite(out) ? out : 99;
+  }
+
   // faces = [{staffId, d: number[]}] -> {staffId, distance, runnerUp: {staffId, distance}|null, margin}
   // best = nearest sample overall; runnerUp = nearest sample of a DIFFERENT person.
   function match(descriptor, faces) {
+    if (!isFiniteVec128(descriptor) || !Array.isArray(faces)) return null;
     let best = null, second = null;
     for (const f of faces) {
-      const dist = faceapi.euclideanDistance(descriptor, f.d);
+      if (!f || !isFiniteVec128(f.d)) continue;
+      const dist = safeEuclidean128(descriptor, f.d);
+      if (!Number.isFinite(dist) || dist >= 99) continue;
       if (!best || dist < best.distance) {
         if (best && best.staffId !== f.staffId) second = best;
         best = { staffId: f.staffId, distance: dist };
@@ -233,9 +256,9 @@ const Face = (() => {
   // Accept / reject a match result. threshold may be overridden per device.
   function decide(m, threshold) {
     const t = threshold == null ? M().threshold : threshold;
-    if (!m) return { ok: false, reason: "no-enrolments" };
-    if (m.distance > t) return { ok: false, reason: "far" };
-    if (m.runnerUp && m.margin < M().margin) return { ok: false, reason: "ambiguous" };
+    if (!m || !Number.isFinite(m.distance)) return { ok: false, reason: "no-enrolments" };
+    if (!Number.isFinite(t) || m.distance > t) return { ok: false, reason: "far" };
+    if (m.runnerUp && (!Number.isFinite(m.margin) || m.margin < M().margin)) return { ok: false, reason: "ambiguous" };
     return { ok: true, weak: m.distance > M().weakAbove, reason: "" };
   }
 
