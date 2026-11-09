@@ -32,6 +32,11 @@ const Face = (() => {
     loading = (async () => {
       const base = "./vendor/models";
       try {
+        if (faceapi.tf && typeof faceapi.tf.env === "function") {
+          faceapi.tf.env().set("WEBGL_PACK", false);
+        }
+      } catch (_) {}
+      try {
         await faceapi.tf.setBackend("webgl");
         await faceapi.tf.ready();
       } catch (e) {
