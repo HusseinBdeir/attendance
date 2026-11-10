@@ -101,21 +101,39 @@ async function waitFor(page, fn, arg, timeout) {
   const ctx = await browser.newContext({ permissions: ["camera"], viewport: { width: 1280, height: 800 } });
 
   // ---- mock API (what the Power Automate flow / ISABI Edge endpoint will do) ----
-  const server = { punches: new Map(), faces: new Map(), calls: [], delayMs: 0, disableVerify: false, staffAdded: new Map(), rejectStaff: false, rejectPunchIds: new Set() };
+  // v0.6.0: staffActive = id -> false for a person switched off (the last switch to arrive stands),
+  // staffSeen = every staff item a sync carried, rosterBodies = every roster request, validKeys = station keys accepted.
+  const server = { punches: new Map(), faces: new Map(), calls: [], delayMs: 0, disableVerify: false, staffAdded: new Map(), rejectStaff: false, rejectPunchIds: new Set(),
+    staffActive: new Map(), staffSeen: [], rosterBodies: [], validKeys: new Set(["k"]), rosterDelayMs: 0 };
   const roster = [
     { id: "11111111-1111-1111-1111-111111111111", name: "Alice A", officialName: "Alice Abbas" },
     { id: "22222222-2222-2222-2222-222222222222", name: "Bilal B", officialName: "Bilal Baz" },
     { id: "33333333-3333-3333-3333-333333333333", name: "Carla C", officialName: "" },
   ];
+  const isOff = id => server.staffActive.get(id) === false;
+  // The site's people, one row per id. A person switched off is left out unless the tablet asks
+  // for them (includeInactive), and then comes back as active: false with no enrolments.
+  const serverStaff = body => {
+    const byId = new Map();
+    roster.concat([...server.staffAdded.values()]).forEach(s => { if (!byId.has(s.id)) byId.set(s.id, s); });
+    const out = [];
+    for (const s of byId.values()) {
+      if (!isOff(s.id)) out.push(s);
+      else if (body.includeInactive === true) out.push({ id: s.id, name: s.name, officialName: s.officialName || "", active: false });
+    }
+    return out;
+  };
   await ctx.route("**/fakeapi", async route => {
     const body = JSON.parse(route.request().postData() || "{}");
     server.calls.push(body.op);
     if (server.delayMs) await sleep(server.delayMs);
-    if (body.key !== "k") return route.fulfill({ status: 401, body: "bad key" });
+    if (!server.validKeys.has(body.key)) return route.fulfill({ status: 401, body: "bad key" });
     if (body.op === "roster") {
+      server.rosterBodies.push(body);
       if (body.redact) {
-        const allF = [...server.faces.values()];
-        const staffOut = roster.map(s => {
+        const allF = [...server.faces.values()].filter(f => !isOff(f.staffId));
+        const staffOut = serverStaff(body).map(s => {
+          if (s.active === false) return s;
           const sf = allF.filter(f => f.staffId === s.id);
           return {
             id: s.id,
@@ -136,10 +154,17 @@ async function waitFor(page, fn, arg, timeout) {
         }));
         return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, redacted: true, staff: staffOut, faces: facesOut }) });
       }
-      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, staff: roster.concat([...server.staffAdded.values()]), faces: body.restore ? [...server.faces.values()] : [] }) });
+      // the list is read first and answered later (rosterDelayMs), like a slow link: what arrives can be older than a switch
+      const rosterAnswer = JSON.stringify({ ok: true, staff: serverStaff(body), faces: body.restore ? [...server.faces.values()].filter(f => !isOff(f.staffId)) : [] });
+      if (server.rosterDelayMs) await sleep(server.rosterDelayMs);
+      return route.fulfill({ contentType: "application/json", body: rosterAnswer });
     }
     if (body.op === "sync") {
-      if (!server.rejectStaff) (body.staff || []).forEach(s => server.staffAdded.set(s.id, { id: s.id, name: s.name, officialName: s.officialName || "" }));
+      (body.staff || []).forEach(s => server.staffSeen.push(s));
+      if (!server.rejectStaff) (body.staff || []).forEach(s => {
+        server.staffAdded.set(s.id, { id: s.id, name: s.name, officialName: s.officialName || "" });
+        if (typeof s.active === "boolean") server.staffActive.set(s.id, s.active);   // absent = left as it is
+      });
       (body.punches || []).forEach(p => { if (!server.rejectPunchIds.has(p.id)) server.punches.set(p.id, p); });
       (body.faces || []).forEach(f => {
         if (!f || !f.id) return;
@@ -174,7 +199,7 @@ async function waitFor(page, fn, arg, timeout) {
     }
     if (body.op === "verify" && !server.disableVerify) {
       if (body.method === "pin") {
-        const hit = [...server.faces.values()].find(f => f.pinhash && f.pinhash === body.pinhash);
+        const hit = [...server.faces.values()].find(f => f.pinhash && f.pinhash === body.pinhash && !isOff(f.staffId));
         if (!hit) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: false, reason: "bad-pin" }) });
         return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: true, staffId: hit.staffId }) });
       }
@@ -190,7 +215,7 @@ async function waitFor(page, fn, arg, timeout) {
             sampleCounts.set(f.staffId, (sampleCounts.get(f.staffId) || 0) + 1);
           }
         }
-        const usable = [...server.faces.values()].filter(f => Array.isArray(f.descriptor) && f.descriptor.length === 128 && (sampleCounts.get(f.staffId) || 0) >= 3);
+        const usable = [...server.faces.values()].filter(f => Array.isArray(f.descriptor) && f.descriptor.length === 128 && (sampleCounts.get(f.staffId) || 0) >= 3 && !isOff(f.staffId));
         if (!usable.length) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, matched: false, reason: "no-enrolments" }) });
         let best = null, second = null;
         for (const f of usable) {
@@ -245,6 +270,25 @@ async function waitFor(page, fn, arg, timeout) {
   check("with no station key nothing is sent and it is not shown as a sync error",
     epInfo.ready === false && epInfo.ok === null && /station key not set/.test(epInfo.msg) && /station key not set/.test(epInfo.rosterErr) && server.calls.length === 0,
     { ready: epInfo.ready, ok: epInfo.ok, msg: epInfo.msg, rosterErr: epInfo.rosterErr, calls: server.calls.length });
+
+  console.log("1c. station key QR on a fresh tablet takes the site of the key (v0.6.0)");
+  const QR_KEY = "AbCdEfGhIjKlMnOpQrStUvWx";   // 24 characters, as the Command Center makes them
+  const fresh = await page.evaluate(async K => {
+    const toastTxt = () => document.getElementById("toast").textContent;
+    const unknown = await ATT_TEST.applyKeyPayload("ISABIKEY1|NOWHERE|attendance|" + K);
+    const afterUnknown = { key: await ATT_TEST.db.getMeta("apiKey", ""), toast: toastTxt() };
+    const adopt = await ATT_TEST.applyKeyPayload("ISABIKEY1|blanca|attendance|" + K);
+    return {
+      unknown, afterUnknown, adopt, toast: toastTxt(),
+      key: await ATT_TEST.db.getMeta("apiKey", ""), site: await ATT_TEST.db.getMeta("site", ""),
+      shown: document.getElementById("siteName").textContent, ready: await ATT_TEST.sync.ready(),
+    };
+  }, QR_KEY);
+  check("NEGATIVE: a key for a site this app does not know is refused, even on an empty tablet",
+    fresh.unknown.ok === false && fresh.unknown.reason === "site" && fresh.afterUnknown.key === "" && !fresh.afterUnknown.toast.includes(QR_KEY), fresh);
+  check("an empty tablet takes the site named in the key QR, saves the key and says so",
+    fresh.adopt.ok === true && fresh.adopt.siteChanged === true && fresh.site === "BLANCA" && fresh.key === QR_KEY && fresh.shown === "Blanca"
+    && /Blanca/.test(fresh.toast) && !fresh.toast.includes(QR_KEY) && fresh.ready === true && server.calls.length === 0, fresh);
 
   console.log("2. settings + roster");
   await page.evaluate(async () => {
@@ -852,6 +896,21 @@ async function waitFor(page, fn, arg, timeout) {
     inactiveRedacted && inactiveRedacted.matched === false && inactiveRedacted.reason === "inactive",
     inactiveRedacted);
 
+  // NEGATIVE (v0.6.0): the same guard on the redacted PIN path. The server still matches Bilal's PIN,
+  // the tablet knows he is switched off and refuses.
+  const setBilalActive = v => page.evaluate(async on => {
+    const s = await ATT_TEST.db.getStaff("22222222-2222-2222-2222-222222222222");
+    s.active = on; await ATT_TEST.db.saveStaff(s); await ATT_TEST.loadData();
+  }, v);
+  await setBilalActive(false);
+  await page.click("#btnPin");
+  for (const k of ["1", "2", "3", "4"]) await page.click(`#keypad button[data-k="${k}"]`);
+  await sleep(600);
+  check("NEGATIVE: switched-off staff REJECTED on the redacted PIN verify path (keypad stays open, no card)",
+    await page.evaluate(() => document.getElementById("keypad").classList.contains("open") && document.getElementById("card").classList.contains("hidden")));
+  await page.click('#keypad button[data-k="x"]');
+  await setBilalActive(true);
+
   // PIN-only save on redacted Alice preserves her 3 redacted Face ID stubs, and rotating Bilal's PIN ("1234" -> "5678") revokes "1234"
   await page.evaluate(() => {
     ATT_TEST.openManager();
@@ -1033,6 +1092,349 @@ async function waitFor(page, fn, arg, timeout) {
   check("NEGATIVE: the refused punch is set aside with a note and the punch behind it syncs",
     parkRes.ok === true && parkRes.left === 0 && parkRes.parked.synced === 1 && /another site/.test(parkRes.parked.parkedWhy) && /not synced/.test(parkRes.parked.note)
     && server.punches.has("punch-fine-2") && !server.punches.has("punch-refused-1"), parkRes);
+
+  console.log("20. v0.6.0 switch a person off or back on at the door");
+  const seenFor = id => server.staffSeen.filter(s => s.id === id);
+  // Runs a sync to the end (joining one that is already on its way) and reads the person's row back.
+  const settle = id => page.evaluate(async sid => {
+    const r = await ATT_TEST.sync.run("switch-test");
+    for (let i = 0; i < 100 && ATT_TEST.sync.running; i++) await new Promise(res => setTimeout(res, 50));
+    await new Promise(res => setTimeout(res, 150));   // let the app refresh its in-memory flags
+    const mem = ATT_TEST.state.staff.get(sid) || {};
+    return { ok: r.ok, msg: r.msg, row: await ATT_TEST.db.getStaff(sid), mem: { active: mem.active, pending: mem.pending, activeSet: mem.activeSet } };
+  }, id);
+  const pinTry = async digits => {
+    await page.click("#btnPin");
+    for (const k of digits) await page.click(`#keypad button[data-k="${k}"]`);
+    await sleep(600);
+    return page.evaluate(() => ({
+      open: document.getElementById("keypad").classList.contains("open"),
+      cardHidden: document.getElementById("card").classList.contains("hidden"),
+      name: document.getElementById("cardName").textContent,
+    }));
+  };
+  check("every roster request asks for switched-off people too (includeInactive)",
+    server.rosterBodies.length > 0 && server.rosterBodies.every(b => b.includeInactive === true), server.rosterBodies.length);
+  await page.evaluate(async d => {
+    ATT_TEST.hideCard();
+    for (const p of await ATT_TEST.db.punchesForDay(d)) { p.ts = new Date(Date.now() - 10 * 60000).toISOString(); await ATT_TEST.db.savePunch(p); }
+    ATT_TEST.state.lastPunchAt.clear();
+  }, day);
+
+  // switch Bilal off: queued, sent once as active:false, flags cleared
+  let seen0 = seenFor(BILAL).length;
+  const offSaved = await page.evaluate(async id => {
+    const st = await ATT_TEST.setStaffActive(id, false);
+    return { active: st.active, activeSet: st.activeSet, pending: st.pending, srev: st.srev, toast: document.getElementById("toast").textContent };
+  }, BILAL);
+  const offDone = await settle(BILAL);
+  await settle(BILAL);                                  // a second run has nothing left to send
+  const offSent = seenFor(BILAL).slice(seen0);
+  check("switching a person off queues the switch on the tablet first",
+    offSaved.active === false && offSaved.activeSet === true && offSaved.pending === 1 && offSaved.srev === 1 && /Bilal B switched off/.test(offSaved.toast), offSaved);
+  check("the switch is sent once as active:false, and the queue flags are cleared when the server confirms it",
+    offSent.length === 1 && offSent[0].active === false && offDone.ok === true && offDone.row.active === false && offDone.row.pending === undefined && offDone.row.activeSet === undefined
+    && offDone.mem.active === false && offDone.mem.pending === undefined && offDone.mem.activeSet === undefined && server.staffActive.get(BILAL) === false,
+    { sent: offSent, offDone });
+
+  // not matched by PIN or by face, not offered for enrolment or a manual punch
+  const pinOff = await pinTry(["5", "6", "7", "8"]);
+  check("NEGATIVE: a switched-off person's PIN is refused (keypad stays open, no card)", pinOff.open === true && pinOff.cardHidden === true, pinOff);
+  await page.click('#keypad button[data-k="x"]');
+  const faceOnOff = await page.evaluate(async a => {
+    const before = await ATT_TEST.injectDescriptor(a.d);
+    await ATT_TEST.setStaffActive(a.id, false);
+    const off = await ATT_TEST.injectDescriptor(a.d);
+    const rowsKept = (await ATT_TEST.db.facesForStaff(a.id)).filter(f => Array.isArray(f.d) && f.d.length === 128).length;
+    await ATT_TEST.setStaffActive(a.id, true);
+    const back = await ATT_TEST.injectDescriptor(a.d);
+    return { before: before.matched, off: off.matched, back: back.matched, rowsKept };
+  }, { id: ALICE, d: aliceProbe });
+  await settle(ALICE);
+  check("NEGATIVE: a switched-off person's face is not matched; the enrolment rows stay on the tablet and match again once switched on",
+    faceOnOff.before === true && faceOnOff.off === false && faceOnOff.back === true && faceOnOff.rowsKept === 3
+    && seenFor(ALICE).slice(-1)[0].active === true && server.staffActive.get(ALICE) === true, faceOnOff);
+  await page.evaluate(() => { ATT_TEST.openManager(); document.querySelector('.tab[data-tab="staff"]').click(); ATT_TEST.renderLists(); });
+  await sleep(300);
+  const offUi = await page.evaluate(id => {
+    const trs = [...document.querySelectorAll("#stTable tbody tr")];
+    const offIdx = trs.map((tr, i) => tr.classList.contains("isOff") ? i : -1).filter(i => i >= 0);
+    const onIdx = trs.map((tr, i) => tr.classList.contains("isOff") ? -1 : i).filter(i => i >= 0);
+    const tr = trs.find(r => r.querySelector("button[data-on]") && r.querySelector("button[data-on]").dataset.on === id);
+    const total = [...ATT_TEST.state.staff.values()];
+    return {
+      enrolList: [...document.querySelectorAll("#enList div[data-id]")].some(d => d.dataset.id === id),
+      manualList: [...document.querySelectorAll("#mnList div[data-id]")].some(d => d.dataset.id === id),
+      row: tr ? { isOff: tr.classList.contains("isOff"), tag: (tr.querySelector(".tag.off") || {}).textContent, onBtn: tr.querySelector("button[data-on]").textContent, offBtn: !!tr.querySelector("button[data-off]"), enrolBtn: !!tr.querySelector("button[data-en]"), dim: getComputedStyle(tr.querySelector("td.dimOff")).opacity } : null,
+      offLast: offIdx.length > 0 && onIdx.length > 0 && Math.min(...offIdx) > Math.max(...onIdx),
+      kpiActive: document.getElementById("kpiStTotal").textContent,
+      activeCount: total.filter(s => s.active !== false).length, offCount: total.filter(s => s.active === false).length,
+      onRowsHaveSwitchOff: trs.filter(r => !r.classList.contains("isOff")).every(r => r.querySelector("button[data-off]") && r.querySelector("button[data-off]").textContent === "Switch off"),
+    };
+  }, BILAL);
+  check("NEGATIVE: a switched-off person is not offered for enrolment or for a manual punch", offUi.enrolList === false && offUi.manualList === false, offUi);
+  check("Staff tab: the switched-off person shows a muted off tag and a Switch on button, listed last; active people show Switch off",
+    offUi.row && offUi.row.isOff && offUi.row.tag === "off" && offUi.row.onBtn === "Switch on" && !offUi.row.offBtn && !offUi.row.enrolBtn && Number(offUi.row.dim) < 1
+    && offUi.offLast === true && offUi.onRowsHaveSwitchOff === true, offUi);
+  check("Staff KPIs keep counting active people only", offUi.kpiActive === String(offUi.activeCount) && offUi.offCount >= 1, offUi);
+  await page.click('#stFilter button[data-sf="off"]');
+  const offChip = await page.evaluate(id => {
+    const trs = [...document.querySelectorAll("#stTable tbody tr")];
+    return { n: trs.length, allOff: trs.every(r => r.classList.contains("isOff")), hasBilal: trs.some(r => (r.querySelector("button[data-on]") || { dataset: {} }).dataset.on === id) };
+  }, BILAL);
+  check("Staff filter 'Switched Off' lists only the people who are switched off", offChip.n === offUi.offCount && offChip.allOff && offChip.hasBilal, offChip);
+  await page.click('#stFilter button[data-sf="all"]');
+
+  // a roster refresh while the switch is still queued must not flip the person back on
+  server.rejectStaff = true;
+  await page.evaluate(id => ATT_TEST.setStaffActive(id, false), CARLA);
+  const pendSync = await settle(CARLA);
+  const pendRoster = await page.evaluate(async id => {
+    const ro = await ATT_TEST.sync.roster(false);
+    await ATT_TEST.loadData();
+    return { ro, row: await ATT_TEST.db.getStaff(id) };
+  }, CARLA);
+  check("NEGATIVE: a roster refresh while the switch is still queued does not flip the person back on",
+    pendSync.ok === false && server.staffActive.get(CARLA) === undefined
+    && pendRoster.row.active === false && pendRoster.row.pending === 1 && pendRoster.row.activeSet === true, { pendSync, pendRoster });
+  server.rejectStaff = false;
+  const pendDone = await settle(CARLA);
+  const pendAfter = await page.evaluate(async id => { await ATT_TEST.sync.roster(false); await ATT_TEST.loadData(); return ATT_TEST.db.getStaff(id); }, CARLA);
+  check("once the server takes the queued switch the person stays off through the next roster refresh",
+    pendDone.ok === true && pendDone.row.pending === undefined && pendDone.row.activeSet === undefined && server.staffActive.get(CARLA) === false
+    && pendAfter.active === false && pendAfter.pending === undefined, { pendDone, pendAfter });
+
+  // switch Bilal back on: active:true goes out, the PIN works again
+  seen0 = seenFor(BILAL).length;
+  const onToast = await page.evaluate(async id => { await ATT_TEST.setStaffActive(id, true); return document.getElementById("toast").textContent; }, BILAL);
+  const onDone = await settle(BILAL);
+  const onSent = seenFor(BILAL).slice(seen0);
+  check("switching the person back on sends active:true once and clears the queue flags",
+    onSent.length === 1 && onSent[0].active === true && onDone.row.active === true && onDone.row.pending === undefined && onDone.row.activeSet === undefined
+    && onDone.row.srev === 2 && server.staffActive.get(BILAL) === true && /Bilal B switched on/.test(onToast), { onSent, onDone, onToast });
+  await page.evaluate(() => ATT_TEST.closeManager());
+  const pinOn = await pinTry(["5", "6", "7", "8"]);
+  check("after switching back on the PIN clocks the person again", pinOn.open === false && pinOn.cardHidden === false && /Bilal/.test(pinOn.name), pinOn);
+  await page.evaluate(() => ATT_TEST.hideCard());
+
+  // a person the server lists as active:false (switched off elsewhere) shows as switched off here
+  server.staffActive.set(ALICE, false);
+  const srvOff = await page.evaluate(async id => {
+    const ro = await ATT_TEST.sync.roster(false);
+    await ATT_TEST.loadData();
+    ATT_TEST.openManager(); document.querySelector('.tab[data-tab="staff"]').click();
+    const tr = [...document.querySelectorAll("#stTable tbody tr")].find(r => (r.querySelector("button[data-on]") || { dataset: {} }).dataset.on === id);
+    return { ro, row: await ATT_TEST.db.getStaff(id), shownOff: !!(tr && tr.classList.contains("isOff")), usable: ATT_TEST.state.faces.filter(f => f.staffId === id).length };
+  }, ALICE);
+  check("a person the server lists as active:false shows as switched off after a roster pull, with nothing queued",
+    srvOff.row.active === false && srvOff.row.pending === undefined && srvOff.row.activeSet === undefined && srvOff.shownOff === true && srvOff.ro.off >= 1 && srvOff.usable === 3, srvOff);
+  server.staffActive.delete(ALICE);
+  const srvOn = await page.evaluate(async id => { await ATT_TEST.sync.roster(false); await ATT_TEST.loadData(); return ATT_TEST.db.getStaff(id); }, ALICE);
+  check("and comes back on when the server lists them as active again", srvOn.active === true && srvOn.pending === undefined, srvOn);
+
+  // a person merely added never carries the active field
+  const evan = await page.evaluate(async () => { const st = await ATT_TEST.addLocalStaff("Evan Extra"); return st.id; });
+  const evanDone = await settle(evan);
+  check("a person merely added is sent with no active field",
+    seenFor(evan).length >= 1 && seenFor(evan).every(s => !("active" in s)) && evanDone.row.pending === undefined && server.staffActive.get(evan) === undefined, seenFor(evan));
+
+  // the Staff tab buttons: Switch off asks first, Switch on does not
+  await page.evaluate(() => { document.querySelector('.tab[data-tab="staff"]').click(); });
+  await page.click(`#stTable button[data-off="${evan}"]`);          // no dialog handler = the confirmation is declined
+  await sleep(300);
+  const declined = await page.evaluate(id => ATT_TEST.db.getStaff(id), evan);
+  let asked = "";
+  page.once("dialog", d => { asked = d.message(); d.accept(); });
+  await page.click(`#stTable button[data-off="${evan}"]`);
+  await waitFor(page, async id => (await ATT_TEST.db.getStaff(id)).active === false, evan, 10000);
+  const uiOff = await settle(evan);
+  const uiOffToast = await page.textContent("#toast");
+  await page.click(`#stTable button[data-on="${evan}"]`);
+  await waitFor(page, async id => (await ATT_TEST.db.getStaff(id)).active === true, evan, 10000);
+  const uiOn = await settle(evan);
+  check("Switch off asks for confirmation (declining leaves the person on); Switch on needs none",
+    declined.active === true && declined.pending === undefined && /Switch off Evan Extra/.test(asked)
+    && uiOff.row.active === false && /Evan Extra switched off/.test(uiOffToast) && uiOn.row.active === true && uiOn.row.pending === undefined
+    && seenFor(evan).filter(s => "active" in s).map(s => s.active).join(",") === "false,true", { declined, asked, uiOff, uiOn });
+
+  // switched again while the first push is on the wire: the row stays queued until the newer switch has gone out
+  const DINA = addRes.id;
+  seen0 = seenFor(DINA).length;
+  server.delayMs = 1500;
+  await page.evaluate(id => ATT_TEST.setStaffActive(id, false), DINA);
+  await sleep(400);
+  await page.evaluate(id => ATT_TEST.setStaffActive(id, true), DINA);
+  await waitFor(page, async id => { const r = await ATT_TEST.db.getStaff(id); return r && r.pending !== 1 && !ATT_TEST.sync.running; }, DINA, 20000);
+  server.delayMs = 0;
+  const raceRow = await page.evaluate(id => ATT_TEST.db.getStaff(id), DINA);
+  const raceSent = seenFor(DINA).slice(seen0).map(s => s.active);
+  check("a switch made during an in-flight push stays queued and is sent after it (srev guard)",
+    raceSent.join(",") === "false,true" && raceRow.active === true && raceRow.pending === undefined && raceRow.activeSet === undefined && server.staffActive.get(DINA) === true,
+    { raceSent, raceRow });
+
+  // a roster answer that was read on the server before the switch arrives after the switch has synced
+  server.rosterDelayMs = 1500;
+  await page.evaluate(() => { window.__slowRosterDone = false; window.__slowRoster = ATT_TEST.sync.roster(false).then(r => { window.__slowRosterDone = true; return r; }); });
+  await sleep(300);
+  await page.evaluate(id => ATT_TEST.setStaffActive(id, false), evan);
+  const lateSync = await settle(evan);
+  const rosterStillOut = await page.evaluate(() => window.__slowRosterDone === false);
+  const lateRoster = await page.evaluate(async id => {
+    const ro = await window.__slowRoster;
+    await ATT_TEST.loadData();
+    return { ro, row: await ATT_TEST.db.getStaff(id) };
+  }, evan);
+  server.rosterDelayMs = 0;
+  const lateNext = await page.evaluate(async id => { await ATT_TEST.sync.roster(false); await ATT_TEST.loadData(); return ATT_TEST.db.getStaff(id); }, evan);
+  check("NEGATIVE: a roster answer older than a switch that has already synced does not undo the switch",
+    rosterStillOut === true && lateSync.row.pending === undefined && server.staffActive.get(evan) === false && lateRoster.row.active === false && lateRoster.row.pending === undefined
+    && lateNext.active === false, { lateSync, lateRoster, lateNext });
+  await page.evaluate(() => ATT_TEST.closeManager());
+
+  console.log("21. v0.6.0 station key payload (typed, pasted or scanned)");
+  const PLAIN_KEY = "PlainStationKey123";
+  server.validKeys.add(QR_KEY); server.validKeys.add(PLAIN_KEY);
+  const keyRes = await page.evaluate(async a => {
+    const getKey = () => ATT_TEST.db.getMeta("apiKey", "");
+    const toastTxt = () => document.getElementById("toast").textContent;
+    const out = {};
+    await ATT_TEST.db.setMeta("apiKey", "k");
+    out.till = await ATT_TEST.applyKeyPayload("ISABIKEY1|LAUNA|pos|" + a.K);
+    out.tillKey = await getKey(); out.tillToast = toastTxt();
+    out.wrong = await ATT_TEST.applyKeyPayload("ISABIKEY1|BLANCA|attendance|" + a.K);
+    out.wrongKey = await getKey(); out.wrongToast = toastTxt(); out.wrongSite = await ATT_TEST.db.getMeta("site", "");
+    out.broken = await ATT_TEST.applyKeyPayload("ISABIKEY1|LAUNA|attendance");
+    out.brokenKey = await getKey();
+    out.short = await ATT_TEST.applyKeyPayload("short-key");
+    out.shortQr = await ATT_TEST.applyKeyPayload("ISABIKEY1|LAUNA|attendance|abc");
+    out.shortKey = await getKey(); out.shortToast = toastTxt();
+    out.plain = await ATT_TEST.applyKeyPayload("  " + a.P + "  ");
+    out.plainKey = await getKey(); out.plainToast = toastTxt();
+    out.good = await ATT_TEST.applyKeyPayload("ISABIKEY1|launa|attendance|" + a.K);
+    out.goodKey = await getKey(); out.goodToast = toastTxt(); out.goodSite = await ATT_TEST.db.getMeta("site", "");
+    // pasting the whole QR text into the field and pressing Save station key goes through the same function
+    await ATT_TEST.db.setMeta("apiKey", "k");
+    ATT_TEST.openManager(); document.querySelector('.tab[data-tab="settings"]').click();
+    document.getElementById("setKey").value = "ISABIKEY1|LAUNA|attendance|" + a.K;
+    document.getElementById("setKeySave").click();
+    for (let i = 0; i < 60 && (await getKey()) !== a.K; i++) await new Promise(res => setTimeout(res, 50));
+    await new Promise(res => setTimeout(res, 300));
+    out.pasteKey = await getKey(); out.pasteField = document.getElementById("setKey").value; out.pasteToast = toastTxt();
+    out.placeholder = document.getElementById("setKey").placeholder;
+    out.info = document.getElementById("setInfo").textContent;
+    await ATT_TEST.db.setMeta("apiKey", "k");
+    return out;
+  }, { K: QR_KEY, P: PLAIN_KEY });
+  const noLeak = [keyRes.tillToast, keyRes.wrongToast, keyRes.shortToast, keyRes.plainToast, keyRes.goodToast, keyRes.pasteToast, keyRes.info].every(t => !t.includes(QR_KEY) && !t.includes(PLAIN_KEY));
+  check("NEGATIVE: a till key (scope pos) is refused and says it is for a till",
+    keyRes.till.ok === false && keyRes.till.reason === "scope" && keyRes.tillKey === "k" && /till/.test(keyRes.tillToast), keyRes.till);
+  check("NEGATIVE: a key for another site is refused when the tablet already holds data, naming both sites",
+    keyRes.wrong.ok === false && keyRes.wrong.reason === "site" && keyRes.wrongKey === "k" && keyRes.wrongSite === "LAUNA"
+    && /Blanca/.test(keyRes.wrongToast) && /La Una/.test(keyRes.wrongToast), { r: keyRes.wrong, toast: keyRes.wrongToast });
+  check("NEGATIVE: a short key (plain or inside a QR payload) and a payload with no key are refused",
+    keyRes.short.ok === false && keyRes.short.reason === "short" && keyRes.shortQr.ok === false && keyRes.shortQr.reason === "short"
+    && keyRes.broken.ok === false && keyRes.broken.reason === "format" && keyRes.brokenKey === "k" && keyRes.shortKey === "k" && /at least 12/.test(keyRes.shortToast),
+    { short: keyRes.short, shortQr: keyRes.shortQr, broken: keyRes.broken });
+  check("a plain key with no prefix still works as before (trimmed, 12 characters or more)",
+    keyRes.plain.ok === true && keyRes.plainKey === PLAIN_KEY && /Station key saved/.test(keyRes.plainToast), keyRes.plain);
+  check("a good attendance payload for this site saves the key (site match ignores case)",
+    keyRes.good.ok === true && keyRes.good.siteChanged === false && keyRes.goodKey === QR_KEY && keyRes.goodSite === "LAUNA" && /Station key saved/.test(keyRes.goodToast), keyRes.good);
+  check("the whole QR text pasted into the field is taken by Save station key, and the field is cleared",
+    keyRes.pasteKey === QR_KEY && keyRes.pasteField === "" && /^Saved/.test(keyRes.placeholder), { key: keyRes.pasteKey === QR_KEY, field: keyRes.pasteField, ph: keyRes.placeholder });
+  check("NEGATIVE: the key itself never appears in a message or in the settings readout", noLeak === true);
+
+  console.log("22. v0.6.0 station key QR scanner (camera handover)");
+  const SCAN_KEY = "ZyXwVuTsRqPoNmLkJiHgFeDc";
+  server.validKeys.add(SCAN_KEY);
+  const scan = await page.evaluate(async K => {
+    const pause = ms => new Promise(res => setTimeout(res, ms));
+    const until = async (fn, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await fn()) return true; await pause(100); } return false; };
+    const btn = document.getElementById("setKeyScan"), sheet = document.getElementById("keyScan");
+    const out = { native: !!window.BarcodeDetector, hiddenWithoutDetector: btn.hidden };
+    // this browser's own detector (if any) is replaced by one the test controls
+    window.__codes = [];
+    window.BarcodeDetector = class { constructor(o) { window.__bdFormats = (o && o.formats) || []; } async detect() { return window.__codes; } };
+    // every camera the scanner asks for (rear-facing preferred) is recorded, so its tracks can be checked after it closes
+    const scans = [];
+    const realGum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async c => {
+      const s = await realGum(c);
+      if (c && c.video && c.video.facingMode && c.video.facingMode.ideal === "environment") scans.push(s);
+      return s;
+    };
+    ATT_TEST.openManager(); document.querySelector('.tab[data-tab="settings"]').click();
+    await pause(400);
+    out.shownWithDetector = !btn.hidden && getComputedStyle(btn).display !== "none";
+    out.kioskAliveBefore = ATT_TEST.streamAlive();
+    btn.click();
+    out.opened = await until(() => !!ATT_TEST.keyScan.stream && !!ATT_TEST.keyScan.timer, 10000);
+    const s1 = scans[0];
+    out.rearCameraAsked = scans.length === 1 && ATT_TEST.keyScan.stream === s1;
+    out.during = {
+      sheetOpen: sheet.classList.contains("open"), kioskStream: ATT_TEST.state.stream === null, kioskAlive: ATT_TEST.streamAlive(),
+      kioskVideoDetached: !document.getElementById("video").srcObject && !document.getElementById("enVideo").srcObject,
+      scanLive: !!s1 && s1.getVideoTracks().some(t => t.readyState === "live"), formats: (window.__bdFormats || []).join(","),
+    };
+    window.__codes = [{ rawValue: "https://example.com/not-a-key" }];
+    await pause(800);
+    out.otherQr = { stillOpen: sheet.classList.contains("open"), msg: document.getElementById("keyScanMsg").textContent };
+    window.__codes = [{ rawValue: "ISABIKEY1|LAUNA|attendance|" + K }];
+    out.closed = await until(() => !sheet.classList.contains("open"), 8000);
+    out.saved = await until(async () => (await ATT_TEST.db.getMeta("apiKey", "")) === K, 8000);
+    out.kioskBack = await until(() => ATT_TEST.streamAlive(), 10000);
+    out.after = {
+      scanStopped: !!s1 && s1.getTracks().every(t => t.readyState === "ended"), scanState: ATT_TEST.keyScan.stream === null && ATT_TEST.keyScan.timer === null,
+      scanVideoDetached: !document.getElementById("keyScanVideo").srcObject, enVideoBack: !!document.getElementById("enVideo").srcObject,
+      toast: document.getElementById("toast").textContent,
+    };
+    // Cancel: same handover
+    window.__codes = [];
+    btn.click();
+    out.opened2 = await until(() => scans.length === 2 && ATT_TEST.keyScan.stream === scans[1], 10000);
+    const s2 = scans[1];
+    document.getElementById("keyScanCancel").click();
+    out.cancel = { closed: !sheet.classList.contains("open"), scanStopped: !!s2 && s2.getTracks().every(t => t.readyState === "ended") };
+    out.kioskBack2 = await until(() => ATT_TEST.streamAlive(), 10000);
+    // a detector that fails closes the scanner with a message and still hands the camera back
+    window.BarcodeDetector = class { constructor() {} async detect() { throw new DOMException("boom", "InvalidStateError"); } };
+    btn.click();
+    out.opened3 = await until(() => scans.length === 3, 10000);
+    const s3 = scans[2];
+    out.errClosed = await until(() => !sheet.classList.contains("open"), 8000);
+    out.err = { toast: document.getElementById("toast").textContent, scanStopped: !!s3 && s3.getTracks().every(t => t.readyState === "ended") };
+    out.kioskBack3 = await until(() => ATT_TEST.streamAlive(), 10000);
+    // Cancel while the scanner is still waiting for a kiosk camera start: the kiosk camera must survive
+    ATT_TEST.startCamera(true);
+    ATT_TEST.openKeyScanner();
+    ATT_TEST.closeKeyScanner();
+    out.earlyCancelBack = await until(() => ATT_TEST.streamAlive(), 10000);
+    await pause(2500);
+    out.earlyCancel = { alive: ATT_TEST.streamAlive(), noScanCamera: scans.length === 3, enVideo: !!document.getElementById("enVideo").srcObject, closed: !sheet.classList.contains("open") };
+    navigator.mediaDevices.getUserMedia = realGum;
+    await ATT_TEST.db.setMeta("apiKey", "k");
+    ATT_TEST.closeManager();
+    return out;
+  }, SCAN_KEY);
+  check("Scan key QR is shown only where the browser has BarcodeDetector",
+    scan.hiddenWithoutDetector === !scan.native && scan.shownWithDetector === true, { native: scan.native, hidden: scan.hiddenWithoutDetector, shown: scan.shownWithDetector });
+  check("the scanner opens on its own camera and the kiosk camera is not left running underneath",
+    scan.kioskAliveBefore === true && scan.opened === true && scan.rearCameraAsked === true && scan.during.sheetOpen && scan.during.kioskStream && scan.during.kioskAlive === false
+    && scan.during.kioskVideoDetached && scan.during.scanLive && scan.during.formats === "qr_code", scan.during);
+  check("a QR code that is not a station key is ignored and the scanner stays open", scan.otherQr.stillOpen === true && /not a station key/.test(scan.otherQr.msg), scan.otherQr);
+  check("the first ISABIKEY1 code closes the scanner, saves the key and stops the scanner's camera",
+    scan.closed === true && scan.saved === true && scan.after.scanStopped && scan.after.scanState && scan.after.scanVideoDetached && !scan.after.toast.includes(SCAN_KEY), scan.after);
+  check("the kiosk and enrol previews get their camera back after a scan", scan.kioskBack === true && scan.after.enVideoBack === true, { back: scan.kioskBack, en: scan.after.enVideoBack });
+  check("Cancel closes the scanner, stops its camera and hands the camera back",
+    scan.opened2 === true && scan.cancel.closed && scan.cancel.scanStopped && scan.kioskBack2 === true, { cancel: scan.cancel, back: scan.kioskBack2 });
+  check("NEGATIVE: a scanner error closes it with a message, stops its camera and hands the camera back",
+    scan.opened3 === true && scan.errClosed === true && /Scanner stopped/.test(scan.err.toast) && scan.err.scanStopped && scan.kioskBack3 === true, { err: scan.err, back: scan.kioskBack3 });
+  check("NEGATIVE: cancelling while the scanner is still starting leaves the kiosk camera running",
+    scan.earlyCancelBack === true && scan.earlyCancel.alive && scan.earlyCancel.noScanCamera && scan.earlyCancel.enVideo && scan.earlyCancel.closed, scan.earlyCancel);
+  const leftover = await page.evaluate(async () => ({
+    staff: (await ATT_TEST.db.unsyncedStaff()).length, punches: await ATT_TEST.db.unsyncedCount(), faces: (await ATT_TEST.db.unsyncedFaces()).length,
+    key: await ATT_TEST.db.getMeta("apiKey", ""), version: ATT_CONFIG.version,
+  }));
+  check("nothing is left queued and the app reports version 0.6.0", leftover.staff === 0 && leftover.punches === 0 && leftover.faces === 0 && leftover.key === "k" && leftover.version === "0.6.0", leftover);
 
   check("no page errors", errors.length === 0, errors);
   console.log(`\n${pass} passed, ${fail} failed`);

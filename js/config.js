@@ -5,7 +5,7 @@
 // station key is typed once per tablet in Settings.
 
 const ATT_CONFIG = {
-  version: "0.5.0",
+  version: "0.6.0",
 
   // Site code -> company name (exact: the server matches the staff register on it).
   sites: {

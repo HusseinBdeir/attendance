@@ -1,19 +1,19 @@
 // BHFIRMS Attendance kiosk — service worker (v0.3.4): cache-first app shell + models,
 // Web Push + Home Screen Badging API (navigator.setAppBadge) + shared unread notification cache.
 // Bump CACHE AND the ?v= strings in index.html on every deploy (they must match — see PWA.md).
-const CACHE = "bhfatt-v0.5.0";
+const CACHE = "bhfatt-v0.6.0";
 const NOTIF_CACHE = "bhfatt-notif-v1";
 const UNREAD_NOTIFS_URL = "./__att_unread_notifs.json";
 const SHELL = [
   "./",
   "./index.html",
-  "./css/att.css?v=0.5.0",
-  "./js/config.js?v=0.5.0",
-  "./js/endpoints.js?v=0.5.0",
-  "./js/db.js?v=0.5.0",
-  "./js/face.js?v=0.5.0",
-  "./js/sync.js?v=0.5.0",
-  "./js/app.js?v=0.5.0",
+  "./css/att.css?v=0.6.0",
+  "./js/config.js?v=0.6.0",
+  "./js/endpoints.js?v=0.6.0",
+  "./js/db.js?v=0.6.0",
+  "./js/face.js?v=0.6.0",
+  "./js/sync.js?v=0.6.0",
+  "./js/app.js?v=0.6.0",
   "./vendor/face-api.js",
   "./vendor/models/tiny_face_detector_model-weights_manifest.json",
   "./vendor/models/tiny_face_detector_model.bin",
@@ -26,12 +26,12 @@ const SHELL = [
   "./vendor/models/face_recognition_model-weights_manifest.json",
   "./vendor/models/face_recognition_model.bin",
   "./brand/isabi-header.svg",
-  "./manifest.webmanifest?v=0.5.0",
-  "./icon.svg?v=0.5.0",
-  "./icon-180.png?v=0.5.0",
-  "./icon-192.png?v=0.5.0",
-  "./icon-512.png?v=0.5.0",
-  "./icon-512-maskable.png?v=0.5.0",
+  "./manifest.webmanifest?v=0.6.0",
+  "./icon.svg?v=0.6.0",
+  "./icon-180.png?v=0.6.0",
+  "./icon-192.png?v=0.6.0",
+  "./icon-512.png?v=0.6.0",
+  "./icon-512-maskable.png?v=0.6.0",
 ];
 
 function applySwAppBadge(count) {

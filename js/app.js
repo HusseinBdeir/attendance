@@ -242,7 +242,9 @@
       verifying = false;
       $("kpDots").classList.remove("shake");
       $("keypad").classList.remove("open");
-      buf = ""; cb = null; state.busy = false;
+      buf = ""; cb = null;
+      // The kiosk loop stays paused while the manager is open (a PIN typed there must not free it).
+      if (!state.mgrOpen) state.busy = false;
     }
     function shake() {
       Sound.play("warn");
@@ -655,6 +657,9 @@
   });
 
   // ---------- kiosk loop ----------
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  // Station key QR scanner state (the scanner itself lives with the settings code below).
+  const keyScan = { open: false, stream: null, timer: null, det: null, busy: false, gumPending: 0, session: 0 };
   const streamAlive = () => !!(state.stream && state.stream.getVideoTracks().some(t => t.readyState === "live"));
   let camStarting = false;
   let lastVideoTime = -1;
@@ -662,6 +667,9 @@
   let lastCamRestartAt = 0;
   async function startCamera(force = false) {
     if (camStarting) return;
+    // The station key scanner owns the camera while it is open (Android gives the camera to one
+    // user at a time); it hands the camera back through restoreKioskCamera() when it closes.
+    if (keyScan.open) return;
     if (!force && streamAlive()) return;
     camStarting = true;
     if (state.stream) { try { state.stream.getTracks().forEach(t => t.stop()); } catch (e) { /* ignore */ } state.stream = null; }
@@ -674,6 +682,8 @@
         video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
         audio: false
       }));
+      // the key scanner opened while this request was waiting: it owns the camera now
+      if (keyScan.open) { stopKioskCamera(); return; }
       // phones/tablets end the track when backgrounded or if Camera HAL disconnects: restart automatically
       state.stream.getVideoTracks().forEach(t => t.addEventListener("ended", () => {
         if (document.visibilityState === "visible") setTimeout(() => startCamera(true).catch(() => {}), 800);
@@ -694,10 +704,18 @@
     if (force || !streamAlive()) { startCamera(true).catch(() => {}); return; }
     const v = $("video"); if (v.paused) v.play().catch(() => {});
   }
+  // Release the kiosk / enrol camera completely (tracks stopped, previews detached).
+  function stopKioskCamera() {
+    if (state.stream) { try { state.stream.getTracks().forEach(t => t.stop()); } catch (e) { /* ignore */ } state.stream = null; }
+    try { $("video").srcObject = null; $("enVideo").srcObject = null; } catch (e) { /* ignore */ }
+  }
   async function keepAwake() {
     try { if ("wakeLock" in navigator && !state.wake) { state.wake = await navigator.wakeLock.request("screen"); state.wake.addEventListener("release", () => { state.wake = null; }); } } catch (e) { /* not granted */ }
   }
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { keepAwake(); if (state.running) resumeCamera(); } });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") { keepAwake(); if (state.running) resumeCamera(); }
+    else if (keyScan.open) closeKeyScanner();   // the tablet was locked or the app left: give the camera up
+  });
 
   function isFiniteDesc128(v) {
     if (!v || v.length !== 128) return false;
@@ -1010,6 +1028,7 @@
   }
   function closeManager() {
     stopTest();
+    if (keyScan.open) closeKeyScanner();
     state.mgrOpen = false; state.busy = false;
     $("mgr").classList.remove("open"); $("kiosk").classList.add("open");
     hideCard();
@@ -1434,7 +1453,8 @@
 
   // ----- staff -----
   function renderStaff() {
-    const allRows = [...state.staff.values()].sort((a, b) => a.name.localeCompare(b.name));
+    // people switched off go last; within each group by name
+    const allRows = [...state.staff.values()].sort((a, b) => ((a.active === false) - (b.active === false)) || a.name.localeCompare(b.name));
     const active = allRows.filter(s => s.active !== false);
     const faceReady = active.filter(s => sampleCount(s.id) >= C.match.minSamples).length;
     const pinReady = active.filter(s => hasStaffPin(s)).length;
@@ -1447,20 +1467,35 @@
 
     const q = ($("stSearch") ? $("stSearch").value : "").trim().toLowerCase();
     let rows = allRows.filter(s => !q || s.name.toLowerCase().includes(q) || (s.officialName || "").toLowerCase().includes(q));
-    if (state.stFilter === "face") rows = rows.filter(s => sampleCount(s.id) >= C.match.minSamples);
-    else if (state.stFilter === "pin") rows = rows.filter(s => hasStaffPin(s) && sampleCount(s.id) < C.match.minSamples);
-    else if (state.stFilter === "none") rows = rows.filter(s => sampleCount(s.id) < C.match.minSamples && !hasStaffPin(s));
+    // The enrolment filters follow the KPI cards above: active people only.
+    if (state.stFilter === "face") rows = rows.filter(s => s.active !== false && sampleCount(s.id) >= C.match.minSamples);
+    else if (state.stFilter === "pin") rows = rows.filter(s => s.active !== false && hasStaffPin(s) && sampleCount(s.id) < C.match.minSamples);
+    else if (state.stFilter === "none") rows = rows.filter(s => s.active !== false && sampleCount(s.id) < C.match.minSamples && !hasStaffPin(s));
+    else if (state.stFilter === "off") rows = rows.filter(s => s.active === false);
 
     const tb = $("stTable").querySelector("tbody");
     tb.innerHTML = rows.map(s => {
+      const off = s.active === false;
       const sc = sampleCount(s.id);
       const isCloudOnly = state.redactedMode && state.faces.filter(f => f.staffId === s.id).length === 0 && sc >= C.match.minSamples;
       const sampleBadge = sc >= C.match.minSamples
         ? `<span class="tag ok">${sc} / ${C.match.maxSamples} ${isCloudOnly ? "cloud" : "ready"}</span>`
         : (sc > 0 ? `${sc} <span class="tag warn">below ${C.match.minSamples}</span>` : `<span class="muted">0</span>`);
-      return `<tr><td><div class="staffCell"><span class="avatarCircle">${esc(initials(s.name))}</span><div><b>${esc(s.name)}</b>${s.officialName ? `<br><small class="muted">${esc(s.officialName)}</small>` : ""}</div></div></td><td>${sampleBadge}</td><td>${hasStaffPin(s) ? `<span class="tag ok">yes</span>` : "—"}</td><td>${s.active === false ? `<span class="tag warn">no</span>` : "yes"}</td><td><button class="btn small" data-en="${esc(s.id)}">Enrol</button></td></tr>`;
-    }).join("") || `<tr><td colspan="5" class="muted">Roster empty. Add staff with the box above, or refresh from the server.</td></tr>`;
+      const activeCell = off
+        ? `<span class="tag off">off</span> <button class="btn small" type="button" data-on="${esc(s.id)}">Switch on</button>`
+        : `<button class="btn small" type="button" data-off="${esc(s.id)}">Switch off</button>`;
+      // a switched-off person cannot be enrolled until they are switched back on
+      const enrolCell = off ? "" : `<button class="btn small" type="button" data-en="${esc(s.id)}">Enrol</button>`;
+      return `<tr${off ? ` class="isOff"` : ""}><td class="dimOff"><div class="staffCell"><span class="avatarCircle">${esc(initials(s.name))}</span><div><b>${esc(s.name)}</b>${s.officialName ? `<br><small class="muted">${esc(s.officialName)}</small>` : ""}</div></div></td><td class="dimOff">${sampleBadge}</td><td class="dimOff">${hasStaffPin(s) ? `<span class="tag ok">yes</span>` : "—"}</td><td class="activeCell">${activeCell}</td><td>${enrolCell}</td></tr>`;
+    }).join("") || `<tr><td colspan="5" class="muted">${state.stFilter === "off" ? "Nobody is switched off." : (state.staff.size ? "No staff match this filter." : "Roster empty. Add staff with the box above, or refresh from the server.")}</td></tr>`;
     tb.querySelectorAll("button[data-en]").forEach(b => b.addEventListener("click", () => { showTab("enrol"); selectEnrol(b.dataset.en); }));
+    tb.querySelectorAll("button[data-off]").forEach(b => b.addEventListener("click", () => {
+      const st = state.staff.get(b.dataset.off);
+      if (!st) return;
+      if (!confirm(`Switch off ${st.name}? They will not be able to clock in until switched back on.`)) return;
+      setStaffActive(st.id, false);
+    }));
+    tb.querySelectorAll("button[data-on]").forEach(b => b.addEventListener("click", () => setStaffActive(b.dataset.on, true)));
     DBX.getMeta("rosterAt", "").then(at => $("stInfo").textContent = at ? `roster refreshed ${new Date(at).toLocaleString()}` : "roster never refreshed");
   }
   if ($("stSearch")) $("stSearch").addEventListener("input", renderStaff);
@@ -1476,10 +1511,35 @@
       const r = await Sync.roster(restore);
       await loadData();
       renderStaff(); renderEnrolList($("enSearch").value); renderSettings();
-      toast(`Roster: ${r.staff} staff${restore ? `, ${r.restored} enrolment samples restored` : ""}`);
+      toast(`Roster: ${r.staff} staff${r.off ? `, ${r.off} switched off` : ""}${restore ? `, ${r.restored} enrolment samples restored` : ""}`);
     } catch (e) { toast("Roster failed: " + e.message, true); }
   }
   $("stRefresh").addEventListener("click", () => refreshRoster(false));
+
+  // Switch a person off or back on at the door. A switched-off person is not matched by face or
+  // PIN and is not offered for enrolment; their enrolment rows stay on the tablet. The switch is
+  // queued (pending + activeSet, srev bumped) and the next sync carries it to the server.
+  async function setStaffActive(id, on) {
+    const st = await DBX.setStaffActive(id, !!on);
+    if (!st) { toast("Unknown staff id", true); return null; }
+    if (!on) {
+      if (state.enrol.staffId === id) {
+        state.enrol = { staffId: null, samples: [], pin: null };
+        $("enWho").textContent = "Pick a staff member on the left.";
+        ["enCapture", "enClear", "enPin", "enConsent", "enSave"].forEach(x => $(x).disabled = true);
+        $("enPinState").textContent = "";
+        renderSamples();
+      }
+      if (state.manualStaff === id) state.manualStaff = null;
+      if (state.streak.staffId === id) resetStreak();
+      if (state.live && state.live.staffId === id) state.live = null;
+    }
+    await loadData();   // reloads the roster and refreshes the kiosk HUD counters
+    renderStaff(); renderEnrolList($("enSearch").value);
+    toast(on ? `${st.name} switched on` : `${st.name} switched off`);
+    Sync.run("staff").catch(() => {});
+    return st;
+  }
 
   // Add a person on this tablet. They can be enrolled and can punch straight away; the next
   // sync sends them to the server, which then includes them in every roster for this site.
@@ -1661,6 +1721,9 @@
   $("mnCancel").addEventListener("click", () => $("manual").classList.remove("open"));
   async function manualPunch(direction) {
     if (!state.manualStaff) return;
+    // the list only offers active people; a person switched off after being picked is refused too
+    const who = state.staff.get(state.manualStaff);
+    if (!who || who.active === false) { toast("This person is switched off. Switch them on in the Staff tab first.", true, 4500); return; }
     const p = await punch(state.manualStaff, "manual", null, null, direction, "manager entry");
     clearTimeout(state.cardTimer); $("card").className = "card hidden"; state.busy = true;   // stay in manager
     $("manual").classList.remove("open");
@@ -1684,6 +1747,7 @@
     const l = Sync.last;
     const hasKey = !!(await DBX.getMeta("apiKey", ""));
     if ($("setKey")) $("setKey").placeholder = hasKey ? "Saved. Type a new key to replace it" : "Station key for this tablet";
+    if ($("setKeyScan")) $("setKeyScan").hidden = !window.BarcodeDetector;   // scanning needs the browser's QR reader
     $("setInfo").textContent = [
       `version ${C.version} · face backend ${Face.backend} · detector ${Face.detector} · landmarks ${Face.landmarks} · models ${Face.ready ? "ready" : "loading"}`,
       `roster ${state.staff.size} staff · ${state.faces.length} raw vectors on device · redacted 1:N ${state.redactedMode ? "ON" : "off"} · ${pending} punches pending`,
@@ -1767,19 +1831,151 @@
   }
   $("setSync").addEventListener("click", async () => { const r = await Sync.run("manual"); toast(r.msg, r.ok === false); renderSettings(); });
   // The station key is typed once per tablet by the manager and is never shown again.
-  if ($("setKeySave")) {
-    $("setKeySave").addEventListener("click", async () => {
-      const v = $("setKey").value.trim();
-      if (v.length < 12) { toast("The station key is at least 12 characters", true); return; }
-      await DBX.setMeta("apiKey", v);
-      $("setKey").value = "";
-      await renderSettings();
-      toast("Station key saved");
-      const r = await Sync.run("key");
-      if (r && r.ok === false) toast("Key saved, but the server answered: " + r.msg, true);
-      else autoRoster(true);
-    });
+  // One function applies a key, whether it was typed, pasted or scanned. The Command Center shows a
+  // new key as text and as a QR code whose text is ISABIKEY1|<SITE>|<scope>|<key>; a plain key
+  // (no prefix) is taken as typed. The key itself is never logged or shown in a message.
+  const KEY_QR_PREFIX = "ISABIKEY1|";
+  const siteLabel = code => {
+    const c = String(code || "");
+    if (C.sites[c]) return C.sites[c].name;
+    return /^[A-Za-z0-9_-]{2,16}$/.test(c) ? c : "another site";   // never echo arbitrary payload text
+  };
+  async function applyKeyPayload(raw) {
+    const text = String(raw == null ? "" : raw).trim();
+    let key = text;
+    let newSite = "";
+    if (text.slice(0, KEY_QR_PREFIX.length).toUpperCase() === KEY_QR_PREFIX) {
+      const parts = text.split("|");
+      const site = String(parts[1] || "").trim().toUpperCase();
+      const scope = String(parts[2] || "").trim().toLowerCase();
+      key = parts.slice(3).join("|").trim();
+      if (parts.length < 4 || !site || !scope || !key) {
+        toast("This QR code is not a complete station key", true);
+        return { ok: false, reason: "format" };
+      }
+      if (scope !== "attendance") {
+        toast("This key is for a till, not for the attendance tablet", true, 5000);
+        return { ok: false, reason: "scope" };
+      }
+      const cur = String(await DBX.getMeta("site", C.defaultSite) || "");
+      if (site !== cur.toUpperCase()) {
+        const known = Object.keys(C.sites).find(k => k.toUpperCase() === site) || "";
+        const empty = known && (await DBX.punchCount()) === 0 && (await DBX.allStaff()).length === 0;
+        if (!empty) {
+          toast(`This key is for ${siteLabel(known || site)}, but this tablet is set to ${siteLabel(cur)}. Key not saved.`, true, 7000);
+          return { ok: false, reason: "site" };
+        }
+        newSite = known;   // a fresh tablet takes the site the key was made for
+      }
+    }
+    if (key.length < 12) { toast("The station key is at least 12 characters", true); return { ok: false, reason: "short" }; }
+    if (newSite) await DBX.setMeta("site", newSite);
+    await DBX.setMeta("apiKey", key);
+    if ($("setKey")) $("setKey").value = "";
+    if (newSite) await loadData();
+    await renderSettings();
+    toast(newSite ? `Station key saved. This tablet is now set to ${siteLabel(newSite)}.` : "Station key saved", false, newSite ? 5000 : 0);
+    const r = await Sync.run("key");
+    if (r && r.ok === false) toast("Key saved, but the server answered: " + r.msg, true);
+    else autoRoster(true);
+    return { ok: true, site: state.site, siteChanged: !!newSite };
   }
+  if ($("setKeySave")) $("setKeySave").addEventListener("click", () => applyKeyPayload($("setKey").value));
+
+  // ----- station key QR scanner (only where the browser has BarcodeDetector) -----
+  // The scanner takes the camera for itself: the kiosk / enrol stream is stopped first and started
+  // again when the scanner closes, whichever way it closes.
+  function restoreKioskCamera() {
+    (async () => {
+      for (let i = 0; keyScan.gumPending > 0 && i < 80; i++) await wait(100);   // let a late camera grant be released first
+      await wait(350);                                                      // camera teardown on the tablet
+      if (keyScan.open) return;                                             // reopened meanwhile: that session restores on its own close
+      // hidden (tablet locked, app left): do not take the camera in the background; the
+      // visibilitychange handler starts it again when the app is back in view
+      if (document.visibilityState !== "visible") return;
+      await startCamera(true);
+      if (state.mgrOpen) { const v = $("enVideo"); if (v.srcObject && v.paused) v.play().catch(() => {}); }
+    })().catch(() => {});
+  }
+  function closeKeyScanner(msg, bad) {
+    if (!keyScan.open) return;
+    keyScan.open = false;
+    keyScan.session++;
+    clearInterval(keyScan.timer); keyScan.timer = null;
+    const s = keyScan.stream; keyScan.stream = null;
+    if (s) { try { s.getTracks().forEach(t => t.stop()); } catch (e) { /* ignore */ } }
+    try { const v = $("keyScanVideo"); v.pause(); v.srcObject = null; } catch (e) { /* ignore */ }
+    keyScan.det = null;
+    $("keyScan").classList.remove("open");
+    if (msg) toast(msg, !!bad, 4500);
+    restoreKioskCamera();
+  }
+  async function keyScanTick() {
+    if (!keyScan.open || keyScan.busy || !keyScan.det) return;
+    const v = $("keyScanVideo");
+    if (v.readyState < 2 || !v.videoWidth) return;
+    keyScan.busy = true;
+    let hit = "";
+    try {
+      const codes = await keyScan.det.detect(v);
+      if (!keyScan.open) return;
+      const texts = (codes || []).map(c => String((c && c.rawValue) || "").trim());
+      hit = texts.find(t => t.startsWith(KEY_QR_PREFIX)) || "";
+      if (!hit && texts.length) $("keyScanMsg").textContent = "That QR code is not a station key";
+    } catch (e) {
+      closeKeyScanner("Scanner stopped: " + ((e && e.name) || "error") + ". Type the key instead.", true);
+      return;
+    } finally {
+      keyScan.busy = false;
+    }
+    if (!hit) return;
+    // the first station key code ends the scan: close (camera released) and apply it
+    closeKeyScanner();
+    try { await applyKeyPayload(hit); }
+    catch (e) { toast("The key could not be saved. Try again or type it.", true, 4500); }
+  }
+  async function openKeyScanner() {
+    if (keyScan.open) return;
+    if (!("BarcodeDetector" in window)) { toast("This tablet cannot scan QR codes. Type the key instead.", true); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast("Camera needs HTTPS (or localhost)", true); return; }
+    const session = ++keyScan.session;
+    const mine = () => keyScan.open && keyScan.session === session;
+    keyScan.open = true;
+    stopTest();
+    $("keyScanMsg").textContent = "Starting camera...";
+    $("keyScan").classList.add("open");
+    try {
+      for (let i = 0; camStarting && i < 50; i++) await wait(100);   // a kiosk camera start in progress finishes first
+      if (!mine()) return;                                           // cancelled while waiting: leave the kiosk camera alone
+      stopKioskCamera();
+      await wait(350);
+      if (!mine()) return;
+      const det = new BarcodeDetector({ formats: ["qr_code"] });
+      let stream = null;
+      keyScan.gumPending++;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      } finally {
+        keyScan.gumPending--;
+      }
+      if (!mine()) { try { stream.getTracks().forEach(t => t.stop()); } catch (e) { /* ignore */ } return; }
+      keyScan.stream = stream;
+      keyScan.det = det;
+      stream.getVideoTracks().forEach(t => t.addEventListener("ended", () => {
+        if (keyScan.open && keyScan.stream === stream) closeKeyScanner("Camera stopped. Try again or type the key.", true);
+      }));
+      const v = $("keyScanVideo");
+      v.srcObject = stream;
+      await v.play().catch(() => {});
+      if (!mine()) return;
+      $("keyScanMsg").textContent = "Hold the QR code in front of the camera";
+      keyScan.timer = setInterval(keyScanTick, 250);
+    } catch (e) {
+      if (keyScan.session === session) closeKeyScanner("Scanner could not start: " + ((e && (e.message || e.name)) || "camera error"), true);
+    }
+  }
+  if ($("setKeyScan")) $("setKeyScan").addEventListener("click", () => openKeyScanner());
+  if ($("keyScanCancel")) $("keyScanCancel").addEventListener("click", () => closeKeyScanner());
   $("setRoster").addEventListener("click", () => refreshRoster(false));
   $("setRestore").addEventListener("click", () => refreshRoster(true));
   $("setMgrPin").addEventListener("click", () => {
@@ -1830,6 +2026,18 @@
   if ($("syncPill")) $("syncPill").addEventListener("click", async () => { toast("Syncing with server…"); const r = await Sync.run("manual"); toast(r.msg, r.ok === false); });
   Sync.onChange(async () => {
     if (state.redactedMode) await loadData();
+    else {
+      // a sync clears the queued flags (pending, activeSet) on staff rows: clear them on the in-memory
+      // copies too, so a later save of one of them does not queue a stale switch again
+      try {
+        (await DBX.allStaff()).forEach(r => {
+          const m = state.staff.get(r.id);
+          if (!m) return;
+          if (r.pending !== 1) delete m.pending;
+          if (r.activeSet !== true) delete m.activeSet;
+        });
+      } catch (e) { /* keep what we have */ }
+    }
     updateSyncDot();
     if (state.mgrOpen) renderSettings();
   });
@@ -1899,6 +2107,8 @@
       setFrameSource: el => { state.frameSource = el; },
       seedStaff: async list => { await DBX.replaceStaff(list); await loadData(); },
       addLocalStaff,
+      setStaffActive,
+      applyKeyPayload, openKeyScanner, closeKeyScanner, keyScan,
       migrate,
       renderLists: () => { renderStaff(); renderEnrolList(""); renderManualList(""); },
       descriptorsFromImage: async el => (await Face.detectAll(el)).map(r => ({ d: Array.from(r.descriptor), box: r.box, score: r.score, frac: r.frac })),

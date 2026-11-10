@@ -24,7 +24,7 @@ function openDB() {
         f.createIndex("staff", "staffId");
       }
       if (!db.objectStoreNames.contains("staff")) {
-        db.createObjectStore("staff", { keyPath: "id" }); // {id, name, officialName, pinhash, active}
+        db.createObjectStore("staff", { keyPath: "id" }); // {id, name, officialName, pinhash, active, pending, activeSet, srev}
       }
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta", { keyPath: "k" });
@@ -68,6 +68,13 @@ const DBX = {
   unsyncedPunches(limit) {
     return cursorAll("punches", "synced", IDBKeyRange.only(0))
       .then(rows => rows.sort((a, b) => a.ts.localeCompare(b.ts)).slice(0, limit || 1e9));
+  },
+  punchCount() {
+    return openDB().then(db => new Promise((resolve, reject) => {
+      const r = db.transaction("punches").objectStore("punches").count();
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    }));
   },
   unsyncedCount() {
     return openDB().then(db => new Promise((resolve, reject) => {
@@ -216,11 +223,15 @@ const DBX = {
   saveStaff(st) { return tx("staff", "readwrite", s => s.put(st)); },
   allStaff() { return cursorAll("staff"); },
   getStaff(id) { return tx("staff", "readonly", s => s.get(id)); },
-  replaceStaff(list) {
+  // revs (optional) = {id: srev} read just before the roster was requested. A person switched off
+  // or on at the door after that carries a newer srev: the list is older than the switch, even if
+  // the switch has synced since, so the local value stands until the next refresh.
+  replaceStaff(list, revs) {
     return openDB().then(db => new Promise((resolve, reject) => {
       const t = db.transaction("staff", "readwrite");
       const s = t.objectStore("staff");
       const keep = new Set(list.map(x => x.id));
+      const switchedSince = row => !!revs && (row.srev || 0) !== (revs[row.id] || 0);
       const all = s.getAll();
       all.onsuccess = () => {
         const old = new Map(all.result.map(x => [x.id, x]));
@@ -228,11 +239,15 @@ const DBX = {
           const prev = old.get(x.id) || {};
           // never let an absent server field (pinhash: undefined) erase a local value
           const clean = {}; Object.keys(x).forEach(k => { if (x[k] !== undefined) clean[k] = x[k]; });
-          s.put(Object.assign({}, prev, clean, { active: true }));
+          // The server says who is switched off (active: false). A switch made on this tablet that
+          // has not reached the server yet (pending + activeSet) wins until the next sync carries it.
+          const localSwitch = (prev.pending === 1 && prev.activeSet === true) || (prev.id !== undefined && switchedSince(prev));
+          const active = localSwitch ? prev.active !== false : x.active !== false;
+          s.put(Object.assign({}, prev, clean, { active }));
         });
         // A person added on this tablet and not yet accepted by the server (pending) is not in the
         // server's list yet, so the refresh must not switch them off.
-        all.result.forEach(x => { if (!keep.has(x.id) && x.pending !== 1) { x.active = false; s.put(x); } });
+        all.result.forEach(x => { if (!keep.has(x.id) && x.pending !== 1 && !switchedSince(x)) { x.active = false; s.put(x); } });
       };
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
@@ -267,19 +282,59 @@ const DBX = {
       t.onerror = () => reject(t.error);
     }));
   },
-  // Staff added on this tablet that the server has not confirmed yet.
+  // Staff added, or switched off or on, on this tablet that the server has not confirmed yet.
   unsyncedStaff(limit) {
     return cursorAll("staff").then(rows => rows.filter(s => s.pending === 1).slice(0, limit || 1e9));
   },
-  markStaffSynced(ids) {
+  // revs = {id: srev} as sent; a person switched off or on while the request was in flight
+  // carries a newer srev and stays pending so the newer switch is pushed on the next run.
+  markStaffSynced(ids, revs) {
     return openDB().then(db => new Promise((resolve, reject) => {
       const t = db.transaction("staff", "readwrite");
       const s = t.objectStore("staff");
       ids.forEach(id => {
         const g = s.get(id);
-        g.onsuccess = () => { const r = g.result; if (!r) return; delete r.pending; s.put(r); };
+        g.onsuccess = () => {
+          const r = g.result; if (!r) return;
+          if (revs && (r.srev || 0) !== (revs[id] || 0)) return;
+          delete r.pending; delete r.activeSet; s.put(r);
+        };
       });
       t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    }));
+  },
+  // Change fields of one staff row in a single transaction (read, fn(row), write), so a switch
+  // made at the same moment is never overwritten with an older copy of the row.
+  patchStaff(id, fn) {
+    return openDB().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction("staff", "readwrite");
+      const s = t.objectStore("staff");
+      let out = null;
+      const g = s.get(id);
+      g.onsuccess = () => { const r = g.result; if (!r) return; fn(r); s.put(r); out = r; };
+      t.oncomplete = () => resolve(out);
+      t.onerror = () => reject(t.error);
+    }));
+  },
+  // Switch a person off or back on at the door. One transaction, so a sync that finishes at the
+  // same moment cannot be overwritten with an older copy of the row. Resolves to the saved row.
+  setStaffActive(id, on) {
+    return openDB().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction("staff", "readwrite");
+      const s = t.objectStore("staff");
+      let out = null;
+      const g = s.get(id);
+      g.onsuccess = () => {
+        const r = g.result; if (!r) return;
+        r.active = !!on;
+        r.activeSet = true;
+        r.pending = 1;
+        r.srev = (r.srev || 0) + 1;
+        s.put(r);
+        out = r;
+      };
+      t.oncomplete = () => resolve(out);
       t.onerror = () => reject(t.error);
     }));
   },

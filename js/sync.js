@@ -1,6 +1,8 @@
-// BHFIRMS Attendance kiosk — sync loop (v0.5.0)
+// BHFIRMS Attendance kiosk — sync loop (v0.6.0)
 // v0.5.0: the endpoint is the ISABI cloud (Cloudflare); the station key is typed once in Settings
 // and never ships in the code; staff added on the tablet are pushed with the same sync.
+// v0.6.0: a person switched off or on at the door is pushed as active: true|false (only for a
+// switch, never for a person who was merely added); the roster also lists switched-off people.
 // Pushes unsynced punches + enrolments to the API endpoint whenever the tablet
 // is online; pulls the site roster on demand; supports Server-Redacted 1:N Mode
 // (redact: true on roster, post-sync local vector/PIN scrubbing, and op: "verify").
@@ -87,7 +89,12 @@ const Sync = (() => {
     const res = await post({
       op: "sync",
       // staff added on this tablet go first so their enrolments and punches have a name on the server
-      staff: staffNew.map(s => Object.assign({ id: s.id, name: s.name, officialName: s.officialName || "" }, s.pinhash ? { pinhash: s.pinhash } : {})),
+      // `active` goes out only for a switch made at the door (activeSet), never for a person merely added
+      staff: staffNew.map(s => Object.assign(
+        { id: s.id, name: s.name, officialName: s.officialName || "" },
+        s.pinhash ? { pinhash: s.pinhash } : {},
+        s.activeSet === true ? { active: s.active !== false } : {}
+      )),
       punches: punches.map(p => ({
         id: p.id, staffId: p.staffId, staffName: p.staffName, ts: p.ts, tzOffsetMin: p.tzOffsetMin,
         day: p.day, direction: p.direction, method: p.method, confidence: p.confidence,
@@ -105,7 +112,9 @@ const Sync = (() => {
     if (badP.length) await DBX.parkPunches(badP, "it belongs to another site");
     const okF = (res.faces || []).filter(id => faces.some(f => f.id === id));
     const okS = (res.staff || []).filter(id => staffNew.some(s => s.id === id));
-    if (okS.length) await DBX.markStaffSynced(okS);
+    // srev as sent: a person switched again while this request was in flight stays pending
+    const srevs = {}; staffNew.forEach(s => { srevs[s.id] = s.srev || 0; });
+    if (okS.length) await DBX.markStaffSynced(okS, srevs);
     const revs = {}; punches.forEach(p => { revs[p.id] = p.rev || 0; });
     if (okP.length) await DBX.markPunchesSynced(okP, revs);
     if (okF.length) {
@@ -168,11 +177,16 @@ const Sync = (() => {
   // In redactedMode, requests redact=true and stores zero raw 128-d vectors or pinhashes on the tablet.
   async function roster(restore) {
     const redacted = !!(await DBX.getMeta("redactedMode", false));
-    const res = await post({ op: "roster", restore: !!restore, redact: redacted });
+    // includeInactive: people switched off at the door come back as active: false, so this tablet
+    // can show them as switched off and offer to switch them back on.
+    // srev of every person before the request: a switch made while the list is on its way is newer than the list
+    const srevBefore = {};
+    (await DBX.allStaff()).forEach(s => { srevBefore[s.id] = s.srev || 0; });
+    const res = await post({ op: "roster", restore: !!restore, redact: redacted, includeInactive: true });
     const useRedacted = !!(redacted || res.redacted);
 
     const staff = (res.staff || []).filter(s => s && s.id).map(s => {
-      const base = { id: s.id, name: s.name || "?", officialName: s.officialName || "" };
+      const base = { id: s.id, name: s.name || "?", officialName: s.officialName || "", active: s.active !== false };
       if (useRedacted) {
         if (s.hasPin || s.pinhash) { base.hasPin = true; base.pinRedacted = true; }
         if (typeof s.faceSamples === "number") base.serverSamples = s.faceSamples;
@@ -181,7 +195,7 @@ const Sync = (() => {
       }
       return base;
     });
-    await DBX.replaceStaff(staff);
+    await DBX.replaceStaff(staff, srevBefore);
 
     let restored = 0;
     if ((restore || useRedacted) && Array.isArray(res.faces)) {
@@ -209,8 +223,7 @@ const Sync = (() => {
           });
           if (isFaceSample) restored++;
           if (hasPin && f.staffId) {
-            const st = await DBX.getStaff(f.staffId);
-            if (st) { st.hasPin = true; st.pinRedacted = true; delete st.pinhash; await DBX.saveStaff(st); }
+            await DBX.patchStaff(f.staffId, st => { st.hasPin = true; st.pinRedacted = true; delete st.pinhash; });
           }
         }
       } else if (restore) {
@@ -256,20 +269,19 @@ const Sync = (() => {
           }
         }
         for (const [sid, entry] of newestPinByStaff.entries()) {
-          const st = await DBX.getStaff(sid);
-          if (st) {
+          await DBX.patchStaff(sid, st => {
             st.pinhash = entry.pinhash;
             st.hasPin = true;
             delete st.pinRedacted;
             delete st.serverSamples;
-            await DBX.saveStaff(st);
-          }
+          });
         }
       }
     }
     if (useRedacted) await DBX.scrubLocalBiometrics();
     await DBX.setMeta("rosterAt", new Date().toISOString());
-    return { staff: staff.length, restored, redacted: useRedacted };
+    const off = staff.filter(s => s.active === false).length;
+    return { staff: staff.length - off, off, restored, redacted: useRedacted };
   }
 
   // Server-side 1:N verification for redacted tablets (op = "verify").

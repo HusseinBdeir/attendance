@@ -8,10 +8,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Attendance">
-<link rel="manifest" href="manifest.webmanifest?v=0.5.0">
-<link rel="icon" type="image/svg+xml" href="icon.svg?v=0.5.0">
-<link rel="apple-touch-icon" href="icon-180.png?v=0.5.0">
-<link rel="stylesheet" href="css/att.css?v=0.5.0">
+<link rel="manifest" href="manifest.webmanifest?v=0.6.0">
+<link rel="icon" type="image/svg+xml" href="icon.svg?v=0.6.0">
+<link rel="apple-touch-icon" href="icon-180.png?v=0.6.0">
+<link rel="stylesheet" href="css/att.css?v=0.6.0">
 </head>
 <body class="loading">
 
@@ -245,6 +245,7 @@
           <button type="button" data-sf="face" class="chip">Face Ready</button>
           <button type="button" data-sf="pin" class="chip">PIN Only</button>
           <button type="button" data-sf="none" class="chip">Not Enrolled</button>
+          <button type="button" data-sf="off" class="chip">Switched Off</button>
         </div>
       </div>
       <div class="toolbarRight">
@@ -345,10 +346,11 @@
 
       <div class="surfaceCard settingsCard">
         <div class="cardTitle">Cloud Sync &amp; Roster Management</div>
-        <p class="muted settingsDesc">Punches, enrolments and staff added here are saved on this tablet first and sync to the ISABI cloud whenever it is online. The station key is typed once and is never shown again.</p>
+        <p class="muted settingsDesc">Punches, enrolments and staff added here are saved on this tablet first and sync to the ISABI cloud whenever it is online. The station key is typed or scanned once and is never shown again.</p>
         <label>Station key <input id="setKey" class="secretInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Station key for this tablet"></label>
         <div class="row">
-          <button id="setKeySave" class="btn">Save station key</button>
+          <button id="setKeySave" class="btn" type="button">Save station key</button>
+          <button id="setKeyScan" class="btn" type="button" hidden>Scan key QR</button>
         </div>
         <div class="row">
           <button id="setSync" class="btn primary">Sync now</button>
@@ -389,6 +391,17 @@
   </div>
 </section>
 
+<!-- station key QR scanner (Settings, Cloud Sync card) -->
+<section id="keyScan" class="sheet">
+  <div class="sheetBox scanBox">
+    <div class="kpTitle">Scan key QR</div>
+    <div class="kpSub">Show the station key QR code from the Command Center</div>
+    <div class="scanCam"><video id="keyScanVideo" autoplay muted playsinline></video></div>
+    <div id="keyScanMsg" class="muted scanMsg">Starting camera...</div>
+    <button id="keyScanCancel" class="btn wide" type="button">Cancel</button>
+  </div>
+</section>
+
 <!-- snapshot preview modal -->
 <section id="photoModal" class="sheet">
   <div class="sheetBox photoBox">
@@ -422,11 +435,11 @@
 <canvas id="snap" hidden></canvas>
 
 <script src="vendor/face-api.js"></script>
-<script src="js/config.js?v=0.5.0"></script>
-<script src="js/endpoints.js?v=0.5.0"></script>
-<script src="js/db.js?v=0.5.0"></script>
-<script src="js/face.js?v=0.5.0"></script>
-<script src="js/sync.js?v=0.5.0"></script>
-<script src="js/app.js?v=0.5.0"></script>
+<script src="js/config.js?v=0.6.0"></script>
+<script src="js/endpoints.js?v=0.6.0"></script>
+<script src="js/db.js?v=0.6.0"></script>
+<script src="js/face.js?v=0.6.0"></script>
+<script src="js/sync.js?v=0.6.0"></script>
+<script src="js/app.js?v=0.6.0"></script>
 </body>
 </html>
