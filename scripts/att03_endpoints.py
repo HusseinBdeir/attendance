@@ -13,6 +13,12 @@ Sources (all under exports/, never committed):
 Usage:  py scripts/att03_endpoints.py [--check]
   --check  only report what would be written (no file change)
 """
+import sys as _sys
+
+# RETIRED 2026-11-10: the kiosk syncs to the ISABI cloud (Cloudflare) and js/endpoints.js holds only that URL.
+# This script wrote the Power Automate callback URL and shared key into a public file; it must not run again.
+_sys.exit("att03_endpoints.py is retired: js/endpoints.js is now a fixed file with no key. See Attendance.md.")
+
 import base64
 import datetime as dt
 import json

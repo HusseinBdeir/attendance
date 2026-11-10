@@ -101,7 +101,7 @@ async function waitFor(page, fn, arg, timeout) {
   const ctx = await browser.newContext({ permissions: ["camera"], viewport: { width: 1280, height: 800 } });
 
   // ---- mock API (what the Power Automate flow / ISABI Edge endpoint will do) ----
-  const server = { punches: new Map(), faces: new Map(), calls: [], delayMs: 0, disableVerify: false };
+  const server = { punches: new Map(), faces: new Map(), calls: [], delayMs: 0, disableVerify: false, staffAdded: new Map(), rejectStaff: false, rejectPunchIds: new Set() };
   const roster = [
     { id: "11111111-1111-1111-1111-111111111111", name: "Alice A", officialName: "Alice Abbas" },
     { id: "22222222-2222-2222-2222-222222222222", name: "Bilal B", officialName: "Bilal Baz" },
@@ -136,10 +136,11 @@ async function waitFor(page, fn, arg, timeout) {
         }));
         return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, redacted: true, staff: staffOut, faces: facesOut }) });
       }
-      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, staff: roster, faces: body.restore ? [...server.faces.values()] : [] }) });
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, staff: roster.concat([...server.staffAdded.values()]), faces: body.restore ? [...server.faces.values()] : [] }) });
     }
     if (body.op === "sync") {
-      (body.punches || []).forEach(p => server.punches.set(p.id, p));
+      if (!server.rejectStaff) (body.staff || []).forEach(s => server.staffAdded.set(s.id, { id: s.id, name: s.name, officialName: s.officialName || "" }));
+      (body.punches || []).forEach(p => { if (!server.rejectPunchIds.has(p.id)) server.punches.set(p.id, p); });
       (body.faces || []).forEach(f => {
         if (!f || !f.id) return;
         const sid = f.staffId;
@@ -169,7 +170,7 @@ async function waitFor(page, fn, arg, timeout) {
           }
         }
       });
-      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, punches: (body.punches || []).map(p => p.id), faces: (body.faces || []).map(f => f.id) }) });
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, punches: (body.punches || []).filter(p => !server.rejectPunchIds.has(p.id)).map(p => p.id), rejectedPunches: (body.punches || []).filter(p => server.rejectPunchIds.has(p.id)).map(p => p.id), faces: (body.faces || []).map(f => f.id), staff: server.rejectStaff ? [] : (body.staff || []).map(s => s.id) }) });
     }
     if (body.op === "verify" && !server.disableVerify) {
       if (body.method === "pin") {
@@ -228,6 +229,22 @@ async function waitFor(page, fn, arg, timeout) {
   check("models loaded (after SW reload)", true);
   const backend = await page.evaluate(() => ATT_TEST.face.backend);
   console.log("     tf backend:", backend);
+
+  console.log("1b. cloud endpoint + station key (v0.5.0)");
+  const epInfo = await page.evaluate(async () => {
+    const d = (typeof ATT_ENDPOINTS === "object" && ATT_ENDPOINTS && ATT_ENDPOINTS.default) || {};
+    const raw = await (await fetch("js/endpoints.js?probe=" + Date.now())).text();
+    const r = await ATT_TEST.sync.run("no-key");
+    let rosterErr = "";
+    try { await ATT_TEST.sync.roster(false); } catch (e) { rosterErr = String(e.message || e); }
+    return { url: d.url || "", keys: Object.keys(d).join(","), raw, ready: await ATT_TEST.sync.ready(), ok: r.ok, msg: r.msg, rosterErr };
+  });
+  check("endpoint is the ISABI cloud and the shipped file carries no key",
+    epInfo.url === "https://isabisystems.com/app/api/kiosk/verify" && epInfo.keys === "url"
+    && !/"[uk]"\s*:|\bkey\s*:/.test(epInfo.raw) && !/[A-Za-z0-9+/=]{40,}/.test(epInfo.raw), { url: epInfo.url, keys: epInfo.keys });
+  check("with no station key nothing is sent and it is not shown as a sync error",
+    epInfo.ready === false && epInfo.ok === null && /station key not set/.test(epInfo.msg) && /station key not set/.test(epInfo.rosterErr) && server.calls.length === 0,
+    { ready: epInfo.ready, ok: epInfo.ok, msg: epInfo.msg, rosterErr: epInfo.rosterErr, calls: server.calls.length });
 
   console.log("2. settings + roster");
   await page.evaluate(async () => {
@@ -906,6 +923,116 @@ async function waitFor(page, fn, arg, timeout) {
   check("toggling redactedMode true -> false restores full 128-d vectors & rotated pinhash (5678) from server",
     unredactRes.tr.ok === true && unredactRes.memFaces === 3 && unredactRes.dbVectors === 3 && unredactRes.bilalHasLocalHash === true && unredactRes.bilalMatchesRotated5678 === true,
     unredactRes);
+
+  console.log("staff added on the tablet (v0.5.0)");
+  server.rejectStaff = true;   // the server has not confirmed the new person yet
+  const addRes = await page.evaluate(async () => {
+    const st = await ATT_TEST.addLocalStaff("  Dina   Door ");
+    const dup = await ATT_TEST.addLocalStaff("dina door");
+    const short = await ATT_TEST.addLocalStaff("x");
+    await new Promise(r => setTimeout(r, 400));
+    const r1 = await ATT_TEST.sync.run("staff-test");
+    await ATT_TEST.sync.roster(false);            // a roster refresh that does not list her yet
+    await ATT_TEST.loadData();
+    const row = await ATT_TEST.db.getStaff(st.id);
+    return { name: st.name, id: st.id, dup, short, r1: { ok: r1.ok, msg: r1.msg }, row, inState: ATT_TEST.state.staff.has(st.id) };
+  });
+  check("a person added on the tablet is trimmed, de-duplicated and usable at once",
+    addRes.name === "Dina Door" && /^loc-/.test(addRes.id) && addRes.dup === null && addRes.short === null && addRes.inState === true, addRes);
+  check("NEGATIVE: an unconfirmed new person survives a roster refresh and stays queued",
+    addRes.row && addRes.row.active === true && addRes.row.pending === 1 && addRes.r1.ok === false && /0\/1 new staff/.test(addRes.r1.msg), addRes);
+  server.rejectStaff = false;
+  const addDone = await page.evaluate(async id => {
+    const r2 = await ATT_TEST.sync.run("staff-test-2");
+    await ATT_TEST.sync.roster(false);
+    await ATT_TEST.loadData();
+    const row = await ATT_TEST.db.getStaff(id);
+    return { r2: { ok: r2.ok, msg: r2.msg }, row, pendingLeft: (await ATT_TEST.db.unsyncedStaff()).length };
+  }, addRes.id);
+  check("once the server confirms her she is on the roster and no longer queued",
+    addDone.r2.ok === true && addDone.pendingLeft === 0 && addDone.row && addDone.row.active === true && addDone.row.pending === undefined
+    && server.staffAdded.has(addRes.id) && server.staffAdded.get(addRes.id).name === "Dina Door", addDone);
+
+  console.log("ids from the server are never trusted as markup (v0.5.0)");
+  const evilRes = await page.evaluate(async () => {
+    const evil = 'x" onfocus="alert(1)" autofocus x="';
+    await ATT_TEST.db.saveStaff({ id: evil, name: "Evil Id", officialName: "", active: true });
+    await ATT_TEST.loadData();
+    ATT_TEST.renderLists();
+    const out = {
+      injected: document.querySelectorAll("[onfocus]").length,
+      enrolBtn: [...document.querySelectorAll("button[data-en]")].some(b => b.dataset.en === evil),
+      listRows: [...document.querySelectorAll("div[data-id]")].filter(d => d.dataset.id === evil).length,
+    };
+    await ATT_TEST.db.saveStaff({ id: evil, name: "Evil Id", officialName: "", active: false });
+    await ATT_TEST.loadData();
+    ATT_TEST.renderLists();
+    return out;
+  });
+  check("NEGATIVE: an id carrying markup stays inside its attribute in every staff list",
+    evilRes.injected === 0 && evilRes.enrolBtn === true && evilRes.listRows >= 1, evilRes);
+
+  console.log("upgrade from v0.4.0: people and enrolments known only to the old server are carried over");
+  const up = await page.evaluate(async () => {
+    const vec = seed => Array.from({ length: 128 }, (_, i) => Math.sin(seed * 31 + i) * 0.2);
+    const id = "01d01d00-0000-4000-8000-000000000001";
+    await ATT_TEST.db.saveStaff({ id, name: "Old Tablet", officialName: "", active: true });
+    for (let n = 1; n <= 3; n++) {
+      await ATT_TEST.db.saveFace({ id: `${id}:${n}`, staffId: id, d: vec(40 + n * 0.001), sample: n, synced: 1, ts: new Date().toISOString() });
+    }
+    await ATT_TEST.db.delMeta("cloudMove050");     // as on a tablet that last ran v0.4.0
+    await ATT_TEST.migrate();
+    const queued = {
+      staff: (await ATT_TEST.db.unsyncedStaff()).some(s => s.id === id),
+      faces: (await ATT_TEST.db.unsyncedFaces()).filter(f => f.staffId === id).length,
+    };
+    const r = await ATT_TEST.sync.run("upgrade");
+    await ATT_TEST.sync.roster(false);             // the first roster refresh after the move
+    await ATT_TEST.loadData();
+    const row = await ATT_TEST.db.getStaff(id);
+    const usable = ATT_TEST.state.faces.filter(f => f.staffId === id && Array.isArray(f.d) && f.d.length === 128).length;
+    await ATT_TEST.migrate();                      // a later boot queues nothing again
+    return { id, queued, ok: r.ok, msg: r.msg, row, usable, requeued: (await ATT_TEST.db.unsyncedStaff()).length, flag: await ATT_TEST.db.getMeta("cloudMove050", false) };
+  });
+  check("the upgrade queues the tablet's own staff and enrolments once",
+    up.queued.staff === true && up.queued.faces === 3 && up.requeued === 0 && up.flag === true, up);
+  check("NEGATIVE: the first roster refresh after the move does not switch an enrolled person off",
+    up.ok === true && up.row && up.row.active === true && up.row.pending === undefined && up.usable === 3
+    && server.staffAdded.has(up.id) && [...server.faces.values()].filter(f => f.staffId === up.id).length === 3, up);
+
+  const offRes = await page.evaluate(async () => {
+    const vec = seed => Array.from({ length: 128 }, (_, i) => Math.sin(seed * 31 + i) * 0.2);
+    const id = "01d01d00-0000-4000-8000-000000000002";
+    await ATT_TEST.db.saveStaff({ id, name: "Left Last Year", officialName: "", active: false });
+    for (let n = 1; n <= 3; n++) {
+      await ATT_TEST.db.saveFace({ id: `${id}:${n}`, staffId: id, d: vec(50 + n * 0.001), sample: n, synced: 1, ts: new Date().toISOString() });
+    }
+    await ATT_TEST.db.delMeta("cloudMove050");
+    await ATT_TEST.migrate();
+    const queuedStaff = (await ATT_TEST.db.unsyncedStaff()).some(s => s.id === id);
+    const queuedFaces = (await ATT_TEST.db.unsyncedFaces()).filter(f => f.staffId === id).length;
+    await ATT_TEST.sync.run("upgrade-2");
+    await ATT_TEST.sync.roster(false);
+    await ATT_TEST.loadData();
+    return { id, queuedStaff, queuedFaces, row: await ATT_TEST.db.getStaff(id) };
+  });
+  check("NEGATIVE: a person the old roster had switched off is not sent to the new server and stays off",
+    offRes.queuedStaff === false && offRes.queuedFaces === 0 && offRes.row.active === false && !server.staffAdded.has(offRes.id)
+    && ![...server.faces.values()].some(f => f.staffId === offRes.id), offRes);
+
+  console.log("a punch the server refuses for good never blocks the queue (v0.5.0)");
+  server.rejectPunchIds.add("punch-refused-1");
+  const parkRes = await page.evaluate(async () => {
+    const mk = (id, ts) => ({ id, staffId: "11111111-1111-1111-1111-111111111111", staffName: "Alice A", ts, tzOffsetMin: 0, day: ts.slice(0, 10), direction: "in", method: "manual", confidence: null, snapshot: "", note: "", synced: 0, rev: 0 });
+    await ATT_TEST.db.savePunch(mk("punch-refused-1", "2026-11-01T07:00:00.000Z"));   // oldest, at the head of the queue
+    await ATT_TEST.db.savePunch(mk("punch-fine-2", "2026-11-01T07:05:00.000Z"));
+    const r = await ATT_TEST.sync.run("park");
+    const parked = await ATT_TEST.db.getPunch("punch-refused-1");
+    return { ok: r.ok, msg: r.msg, left: await ATT_TEST.db.unsyncedCount(), parked: { synced: parked.synced, parkedWhy: parked.parked, note: parked.note } };
+  });
+  check("NEGATIVE: the refused punch is set aside with a note and the punch behind it syncs",
+    parkRes.ok === true && parkRes.left === 0 && parkRes.parked.synced === 1 && /another site/.test(parkRes.parked.parkedWhy) && /not synced/.test(parkRes.parked.note)
+    && server.punches.has("punch-fine-2") && !server.punches.has("punch-refused-1"), parkRes);
 
   check("no page errors", errors.length === 0, errors);
   console.log(`\n${pass} passed, ${fail} failed`);

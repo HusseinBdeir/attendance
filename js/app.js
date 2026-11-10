@@ -1113,7 +1113,7 @@
     else if (state.enFilter === "ready") list = list.filter(s => sampleCount(s.id) >= C.match.minSamples);
     else if (state.enFilter === "pin") list = list.filter(s => hasStaffPin(s));
 
-    el.innerHTML = list.map(s => `<div data-id="${s.id}" class="${s.id === state.enrol.staffId ? "sel" : ""}">${esc(s.name)}<small>${sampleCount(s.id)} samples${hasStaffPin(s) ? " · PIN" : ""}</small></div>`).join("") || `<div class="muted">No staff in the roster. Settings → Refresh roster.</div>`;
+    el.innerHTML = list.map(s => `<div data-id="${esc(s.id)}" class="${s.id === state.enrol.staffId ? "sel" : ""}">${esc(s.name)}<small>${sampleCount(s.id)} samples${hasStaffPin(s) ? " · PIN" : ""}</small></div>`).join("") || `<div class="muted">No staff in the roster. Settings → Refresh roster.</div>`;
     el.querySelectorAll("div[data-id]").forEach(d => d.addEventListener("click", () => selectEnrol(d.dataset.id)));
   }
   $("enSearch").addEventListener("input", e => renderEnrolList(e.target.value));
@@ -1458,8 +1458,8 @@
       const sampleBadge = sc >= C.match.minSamples
         ? `<span class="tag ok">${sc} / ${C.match.maxSamples} ${isCloudOnly ? "cloud" : "ready"}</span>`
         : (sc > 0 ? `${sc} <span class="tag warn">below ${C.match.minSamples}</span>` : `<span class="muted">0</span>`);
-      return `<tr><td><div class="staffCell"><span class="avatarCircle">${esc(initials(s.name))}</span><div><b>${esc(s.name)}</b>${s.officialName ? `<br><small class="muted">${esc(s.officialName)}</small>` : ""}</div></div></td><td>${sampleBadge}</td><td>${hasStaffPin(s) ? `<span class="tag ok">yes</span>` : "—"}</td><td>${s.active === false ? `<span class="tag warn">no</span>` : "yes"}</td><td><button class="btn small" data-en="${s.id}">Enrol</button></td></tr>`;
-    }).join("") || `<tr><td colspan="5" class="muted">Roster empty — refresh from the server.</td></tr>`;
+      return `<tr><td><div class="staffCell"><span class="avatarCircle">${esc(initials(s.name))}</span><div><b>${esc(s.name)}</b>${s.officialName ? `<br><small class="muted">${esc(s.officialName)}</small>` : ""}</div></div></td><td>${sampleBadge}</td><td>${hasStaffPin(s) ? `<span class="tag ok">yes</span>` : "—"}</td><td>${s.active === false ? `<span class="tag warn">no</span>` : "yes"}</td><td><button class="btn small" data-en="${esc(s.id)}">Enrol</button></td></tr>`;
+    }).join("") || `<tr><td colspan="5" class="muted">Roster empty. Add staff with the box above, or refresh from the server.</td></tr>`;
     tb.querySelectorAll("button[data-en]").forEach(b => b.addEventListener("click", () => { showTab("enrol"); selectEnrol(b.dataset.en); }));
     DBX.getMeta("rosterAt", "").then(at => $("stInfo").textContent = at ? `roster refreshed ${new Date(at).toLocaleString()}` : "roster never refreshed");
   }
@@ -1480,6 +1480,27 @@
     } catch (e) { toast("Roster failed: " + e.message, true); }
   }
   $("stRefresh").addEventListener("click", () => refreshRoster(false));
+
+  // Add a person on this tablet. They can be enrolled and can punch straight away; the next
+  // sync sends them to the server, which then includes them in every roster for this site.
+  async function addLocalStaff(rawName) {
+    const name = String(rawName || "").trim().replace(/\s+/g, " ").slice(0, 80);
+    if (name.length < 2) { toast("Type the staff member's name first", true); return null; }
+    const dup = [...state.staff.values()].some(s => s.active !== false && String(s.name || "").toLowerCase() === name.toLowerCase());
+    if (dup) { toast(`${name} is already on the roster`, true); return null; }
+    const st = { id: "loc-" + uuid(), name, officialName: "", active: true, pending: 1 };
+    await DBX.saveStaff(st);
+    await loadData();
+    renderStaff(); renderEnrolList($("enSearch").value);
+    toast(`${name} added. Enrol a face or a PIN next.`);
+    Sync.run("staff").catch(() => {});
+    return st;
+  }
+  if ($("stAdd")) {
+    const submitNewStaff = async () => { const st = await addLocalStaff($("stNewName").value); if (st) $("stNewName").value = ""; };
+    $("stAdd").addEventListener("click", submitNewStaff);
+    $("stNewName").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submitNewStaff(); } });
+  }
 
   // ----- log & shift pairing -----
   function fmtDur(ms) {
@@ -1633,7 +1654,7 @@
   $("logManual").addEventListener("click", () => { state.manualStaff = null; $("mnIn").disabled = $("mnOut").disabled = true; renderManualList(""); $("manual").classList.add("open"); });
   function renderManualList(q) {
     const el = $("mnList");
-    el.innerHTML = staffMatches(q).map(s => `<div data-id="${s.id}" class="${s.id === state.manualStaff ? "sel" : ""}">${esc(s.name)}</div>`).join("");
+    el.innerHTML = staffMatches(q).map(s => `<div data-id="${esc(s.id)}" class="${s.id === state.manualStaff ? "sel" : ""}">${esc(s.name)}</div>`).join("");
     el.querySelectorAll("div[data-id]").forEach(d => d.addEventListener("click", () => { state.manualStaff = d.dataset.id; $("mnIn").disabled = $("mnOut").disabled = false; renderManualList($("mnSearch").value); }));
   }
   $("mnSearch").addEventListener("input", e => renderManualList(e.target.value));
@@ -1661,12 +1682,20 @@
     if ($("setSound")) $("setSound").checked = state.sound;
     const pending = await DBX.unsyncedCount();
     const l = Sync.last;
+    const hasKey = !!(await DBX.getMeta("apiKey", ""));
+    if ($("setKey")) $("setKey").placeholder = hasKey ? "Saved. Type a new key to replace it" : "Station key for this tablet";
     $("setInfo").textContent = [
       `version ${C.version} · face backend ${Face.backend} · detector ${Face.detector} · landmarks ${Face.landmarks} · models ${Face.ready ? "ready" : "loading"}`,
       `roster ${state.staff.size} staff · ${state.faces.length} raw vectors on device · redacted 1:N ${state.redactedMode ? "ON" : "off"} · ${pending} punches pending`,
       `match threshold ${state.threshold} (default ${C.match.threshold}) · runner-up margin ${C.match.margin} · min face ${Math.round(C.match.minFaceFrac * 100)}% of frame · confirm ${C.match.confirmFrames} frames · liveness ${state.liveness ? "ON (blink)" : "off"}`,
       `online ${navigator.onLine} · last sync ${l.at ? l.at.toLocaleString() + " " + (l.ok === false ? "FAILED " : "") + l.msg : "never"}`,
-      (ep => ep.url ? `API endpoint for ${(C.sites[state.site] || {}).name || state.site}: built in${ep.perSite ? " (site-specific key)" : ""}` : `⚠ no API endpoint for site ${state.site} — run scripts/att03_endpoints.py and redeploy`)(Sync.endpointFor(state.site)),
+      (ep => {
+        let host = "";
+        try { host = new URL(ep.url).host; } catch (e) { /* no endpoint */ }
+        return host
+          ? `sync endpoint for ${(C.sites[state.site] || {}).name || state.site}: ${host}${ep.perSite ? " (site-specific)" : ""} · station key ${hasKey ? "saved" : "NOT SET: type it in the Cloud Sync card"}`
+          : `⚠ no sync endpoint for site ${state.site}`;
+      })(Sync.endpointFor(state.site)),
       `service worker ${navigator.serviceWorker && navigator.serviceWorker.controller ? "active" : "none"} · screen wake lock ${state.wake ? "held" : "not held"}`,
       state.defaultPin ? "⚠ manager PIN is the factory default — change it now" : "manager PIN set",
     ].join("\n");
@@ -1731,12 +1760,26 @@
   // or stale, and whenever the site changes. Skipped under automation
   // (navigator.webdriver) so the headless smoke never touches the real API.
   async function autoRoster(force) {
-    if (navigator.webdriver || !navigator.onLine || !Sync.endpointFor(state.site).url) return;
+    if (navigator.webdriver || !navigator.onLine || !(await Sync.ready())) return;
     const at = Date.parse(await DBX.getMeta("rosterAt", "")) || 0;
     const stale = Date.now() - at > C.sync.rosterMaxAgeHours * 3600 * 1000;
     if (force || !state.staff.size || stale) await refreshRoster(false);
   }
   $("setSync").addEventListener("click", async () => { const r = await Sync.run("manual"); toast(r.msg, r.ok === false); renderSettings(); });
+  // The station key is typed once per tablet by the manager and is never shown again.
+  if ($("setKeySave")) {
+    $("setKeySave").addEventListener("click", async () => {
+      const v = $("setKey").value.trim();
+      if (v.length < 12) { toast("The station key is at least 12 characters", true); return; }
+      await DBX.setMeta("apiKey", v);
+      $("setKey").value = "";
+      await renderSettings();
+      toast("Station key saved");
+      const r = await Sync.run("key");
+      if (r && r.ok === false) toast("Key saved, but the server answered: " + r.msg, true);
+      else autoRoster(true);
+    });
+  }
   $("setRoster").addEventListener("click", () => refreshRoster(false));
   $("setRestore").addEventListener("click", () => refreshRoster(true));
   $("setMgrPin").addEventListener("click", () => {
@@ -1776,7 +1819,7 @@
     d.className = "syncDot " + status;
     d.title = `${n} pending · ${l.msg || ""}`;
     if ($("syncLabel")) {
-      $("syncLabel").textContent = !navigator.onLine ? (n ? `Offline (${n})` : "Offline") : (n ? `${n} Pending` : (l.ok === false ? "Sync Err" : "Synced"));
+      $("syncLabel").textContent = !navigator.onLine ? (n ? `Offline (${n})` : "Offline") : (n ? `${n} Pending` : (l.ok === false ? "Sync Err" : (/station key not set/.test(l.msg || "") ? "No Key" : "Synced")));
     }
     if ($("tabLogBadge")) {
       $("tabLogBadge").textContent = String(n);
@@ -1803,6 +1846,13 @@
     const plain = await DBX.getMeta("mgrPin", "");
     if (plain && !(await DBX.getMeta("mgrPinHash", ""))) await setManagerPin(plain);
     else if (plain) await DBX.delMeta("mgrPin");
+    // v0.5.0: the server moved from the Power Automate flow to the ISABI cloud, which starts with no
+    // knowledge of this tablet's staff or enrolments. Queue them once, before the first roster
+    // refresh, so the first sync carries them over and nobody enrolled here is switched off.
+    if (!(await DBX.getMeta("cloudMove050", false))) {
+      await DBX.requeueForCloudMove();
+      await DBX.setMeta("cloudMove050", true);
+    }
   }
   async function boot() {
     tickClock(); setInterval(tickClock, 1000);
@@ -1823,6 +1873,9 @@
     loop();
     Sync.start();
     Sync.run("boot").catch(() => {});
+    // A wall tablet can stay up for weeks: check hourly whether the roster has gone stale (rosterMaxAgeHours)
+    // so someone switched off in the staff register drops off this tablet without a reboot.
+    setInterval(() => { autoRoster(false).catch(() => {}); }, 60 * 60 * 1000);
     if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
       const hadController = Boolean(navigator.serviceWorker.controller);
       navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(() => {});
@@ -1845,6 +1898,9 @@
       ready: () => Face.ready,
       setFrameSource: el => { state.frameSource = el; },
       seedStaff: async list => { await DBX.replaceStaff(list); await loadData(); },
+      addLocalStaff,
+      migrate,
+      renderLists: () => { renderStaff(); renderEnrolList(""); renderManualList(""); },
       descriptorsFromImage: async el => (await Face.detectAll(el)).map(r => ({ d: Array.from(r.descriptor), box: r.box, score: r.score, frac: r.frac })),
       injectDescriptor: (d, src) => handleDescriptor(Array.isArray(d) ? d : new Float32Array(d), src || null),
       detectFrame: async src => { const det = await Face.detectOne(src); return det ? handleDetection(det, src) : { matched: false, reason: "no-face" }; },

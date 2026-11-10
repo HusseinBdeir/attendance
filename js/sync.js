@@ -1,4 +1,6 @@
-// BHFIRMS Attendance kiosk — sync loop (v0.4.0)
+// BHFIRMS Attendance kiosk — sync loop (v0.5.0)
+// v0.5.0: the endpoint is the ISABI cloud (Cloudflare); the station key is typed once in Settings
+// and never ships in the code; staff added on the tablet are pushed with the same sync.
 // Pushes unsynced punches + enrolments to the API endpoint whenever the tablet
 // is online; pulls the site roster on demand; supports Server-Redacted 1:N Mode
 // (redact: true on roster, post-sync local vector/PIN scrubbing, and op: "verify").
@@ -12,29 +14,39 @@ const Sync = (() => {
   function onChange(fn) { listeners.push(fn); }
   function emit() { listeners.forEach(fn => { try { fn(last); } catch (e) { /* ignore */ } }); }
 
-  function dec(s) {
-    if (!s) return "";
-    try { return atob(s); } catch (e) { return ""; }
-  }
+  const LOCAL_URL = /^http:\/\/(127\.0\.0\.1|localhost)[:/]/;
+  // Only a plain URL is read from the shipped file. Anything else in it is ignored, so a stale
+  // v0.4.0 copy (which carried an encoded flow address and key) yields no endpoint at all.
   function endpointFor(site) {
     const E = (typeof ATT_ENDPOINTS === "object" && ATT_ENDPOINTS) || {};
     const e = ((E.sites || {})[site]) || E.default || {};
-    return { url: e.url || dec(e.u) || "", key: e.key || dec(e.k) || "", perSite: !!((E.sites || {})[site]) };
+    const raw = String(e.url || "");
+    const url = (/^https:\/\//.test(raw) || LOCAL_URL.test(raw)) ? raw : "";
+    return { url, perSite: !!((E.sites || {})[site]) };
   }
   async function settings() {
     const site = await DBX.getMeta("site", ATT_CONFIG.defaultSite);
     const ep = endpointFor(site);
     return {
       url: (await DBX.getMeta("apiUrl", "")) || ep.url,
-      key: (await DBX.getMeta("apiKey", "")) || ep.key,
+      key: (await DBX.getMeta("apiKey", "")) || "",
       site,
       device: await DBX.getMeta("device", ""),
     };
   }
 
+  // True once this tablet can talk to the server: an endpoint for its site and a station key.
+  async function ready() {
+    const s = await settings();
+    return !!(s.url && s.key);
+  }
+
   async function post(body, timeoutMs) {
     const s = await settings();
-    if (!s.url) throw new Error(`no API endpoint for site ${s.site} — run scripts/att03_endpoints.py and redeploy`);
+    if (!s.url) throw new Error(`no sync endpoint for site ${s.site}`);
+    if (!s.key) throw new Error("station key not set (Settings, Cloud Sync card)");
+    // Automated test runs never call a live endpoint, whatever is configured.
+    if (navigator.webdriver && !LOCAL_URL.test(s.url)) throw new Error("automated run: live endpoint not called");
     const ctl = new AbortController();
     const tmr = setTimeout(() => ctl.abort(), timeoutMs || 15000);
     let res;
@@ -69,10 +81,13 @@ const Sync = (() => {
   async function pushOnce() {
     const punches = await DBX.unsyncedPunches(ATT_CONFIG.sync.batchPunches);
     const faces = await DBX.unsyncedFaces(ATT_CONFIG.sync.batchFaces);
-    if (!punches.length && !faces.length) return null;
+    const staffNew = await DBX.unsyncedStaff(50);
+    if (!punches.length && !faces.length && !staffNew.length) return null;
     const redactedBefore = !!(await DBX.getMeta("redactedMode", false));
     const res = await post({
       op: "sync",
+      // staff added on this tablet go first so their enrolments and punches have a name on the server
+      staff: staffNew.map(s => Object.assign({ id: s.id, name: s.name, officialName: s.officialName || "" }, s.pinhash ? { pinhash: s.pinhash } : {})),
       punches: punches.map(p => ({
         id: p.id, staffId: p.staffId, staffName: p.staffName, ts: p.ts, tzOffsetMin: p.tzOffsetMin,
         day: p.day, direction: p.direction, method: p.method, confidence: p.confidence,
@@ -86,17 +101,21 @@ const Sync = (() => {
     });
     const redactedNow = redactedBefore || !!(await DBX.getMeta("redactedMode", false));
     const okP = (res.punches || []).filter(id => punches.some(p => p.id === id));
+    const badP = (res.rejectedPunches || []).filter(id => punches.some(p => p.id === id));
+    if (badP.length) await DBX.parkPunches(badP, "it belongs to another site");
     const okF = (res.faces || []).filter(id => faces.some(f => f.id === id));
+    const okS = (res.staff || []).filter(id => staffNew.some(s => s.id === id));
+    if (okS.length) await DBX.markStaffSynced(okS);
     const revs = {}; punches.forEach(p => { revs[p.id] = p.rev || 0; });
     if (okP.length) await DBX.markPunchesSynced(okP, revs);
     if (okF.length) {
       await DBX.markFacesSynced(okF, { scrubLocal: redactedNow });
       if (redactedNow) await DBX.scrubLocalBiometrics();
     }
-    if (okP.length < punches.length || okF.length < faces.length) {
-      throw new Error(`server accepted ${okP.length}/${punches.length} punches, ${okF.length}/${faces.length} faces`);
+    if (okP.length + badP.length < punches.length || okF.length < faces.length || okS.length < staffNew.length) {
+      throw new Error(`server accepted ${okP.length}/${punches.length} punches, ${okF.length}/${faces.length} faces, ${okS.length}/${staffNew.length} new staff`);
     }
-    return { punches: okP.length, faces: okF.length };
+    return { punches: okP.length + badP.length, faces: okF.length, staff: okS.length };
   }
 
   let queued = false;
@@ -111,6 +130,12 @@ const Sync = (() => {
     activeRunPromise = (async () => {
       let curReason = reason;
       try {
+        if (!(await ready())) {
+          // Not an error: punches and enrolments keep queuing on the tablet until the key is typed.
+          last = { at: new Date(), ok: null, msg: "station key not set" };
+          emit();
+          return last;
+        }
         do {
           queued = false;
           const total = { punches: 0, faces: 0 };
@@ -260,5 +285,5 @@ const Sync = (() => {
   }
   function stop() { if (timer) clearInterval(timer); timer = null; }
 
-  return { run, roster, verify, start, stop, onChange, endpointFor, get last() { return last; }, get running() { return running; } };
+  return { run, roster, verify, start, stop, onChange, endpointFor, ready, get last() { return last; }, get running() { return running; } };
 })();

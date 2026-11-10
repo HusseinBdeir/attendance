@@ -1509,3 +1509,6 @@ input:focus, select:focus {
   color: var(--muted);
   margin-top: 2px;
 }
+
+/* Station key field: masked like a PIN without using type=password (no save-password prompt on the tablet). */
+.secretInput { -webkit-text-security: disc; letter-spacing: 0.08em; }

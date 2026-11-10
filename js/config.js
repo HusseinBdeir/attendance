@@ -1,13 +1,13 @@
 // BHFIRMS Attendance kiosk — configuration
 // One tablet = one site. The site is picked once in Settings (manager PIN) and
-// maps to the Dataverse business unit whose staff the tablet serves.
-// Nothing secret lives here: the API URL + key come from js/endpoints.js
-// (generated per site by scripts/att03_endpoints.py, gitignored).
+// maps to the company whose staff the tablet serves.
+// Nothing secret lives here: the sync URL comes from js/endpoints.js and the
+// station key is typed once per tablet in Settings.
 
 const ATT_CONFIG = {
-  version: "0.4.0",
+  version: "0.5.0",
 
-  // Site code -> business-unit display name in Dataverse (exact, the API filters on it).
+  // Site code -> company name (exact: the server matches the staff register on it).
   sites: {
     LAUNA:    { name: "La Una",          bu: "La Una" },
     BLANCA:   { name: "Blanca",          bu: "Blanca" },

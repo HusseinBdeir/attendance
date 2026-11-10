@@ -95,6 +95,28 @@ const DBX = {
     }));
   },
 
+  // Punches the server names as refused for good (their id already belongs to another site, which
+  // happens only after a tablet was moved to a different site). They are set aside with a note so
+  // they can never hold up the punches behind them; the row stays in the Log.
+  parkPunches(ids, why) {
+    return openDB().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction("punches", "readwrite");
+      const s = t.objectStore("punches");
+      ids.forEach(id => {
+        const g = s.get(id);
+        g.onsuccess = () => {
+          const r = g.result; if (!r) return;
+          r.synced = 1;
+          r.parked = why || "refused by the server";
+          r.note = ((r.note ? r.note + " · " : "") + "not synced: " + r.parked).slice(0, 200);
+          s.put(r);
+        };
+      });
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    }));
+  },
+
   // faces (enrolment samples)
   saveFace(f) { return tx("faces", "readwrite", s => s.put(f)); },
   allFaces() { return cursorAll("faces"); },
@@ -208,8 +230,55 @@ const DBX = {
           const clean = {}; Object.keys(x).forEach(k => { if (x[k] !== undefined) clean[k] = x[k]; });
           s.put(Object.assign({}, prev, clean, { active: true }));
         });
-        all.result.forEach(x => { if (!keep.has(x.id)) { x.active = false; s.put(x); } });
+        // A person added on this tablet and not yet accepted by the server (pending) is not in the
+        // server's list yet, so the refresh must not switch them off.
+        all.result.forEach(x => { if (!keep.has(x.id) && x.pending !== 1) { x.active = false; s.put(x); } });
       };
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    }));
+  },
+  // One-time, on the upgrade to v0.5.0: mark every active person and every enrolment that still holds
+  // its data on this tablet as not yet sent, so they reach the new server. Rows that were already
+  // scrubbed (Server-Redacted mode) hold nothing to send and are left alone.
+  requeueForCloudMove() {
+    return openDB().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction(["faces", "staff"], "readwrite");
+      const fs = t.objectStore("faces");
+      const ss = t.objectStore("staff");
+      const allS = ss.getAll();
+      allS.onsuccess = () => {
+        // People the old roster had switched off stay off: neither they nor their enrolments are sent.
+        const off = new Set();
+        (allS.result || []).forEach(st => {
+          if (st.active === false) { off.add(st.id); return; }
+          if (st.pending !== 1) { st.pending = 1; ss.put(st); }
+        });
+        const allF = fs.getAll();
+        allF.onsuccess = () => {
+          (allF.result || []).forEach(f => {
+            if (off.has(f.staffId)) return;
+            const hasData = (Array.isArray(f.d) && f.d.length === 128) || !!f.pinhash;
+            if (hasData && f.synced !== 0) { f.synced = 0; fs.put(f); }
+          });
+        };
+      };
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    }));
+  },
+  // Staff added on this tablet that the server has not confirmed yet.
+  unsyncedStaff(limit) {
+    return cursorAll("staff").then(rows => rows.filter(s => s.pending === 1).slice(0, limit || 1e9));
+  },
+  markStaffSynced(ids) {
+    return openDB().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction("staff", "readwrite");
+      const s = t.objectStore("staff");
+      ids.forEach(id => {
+        const g = s.get(id);
+        g.onsuccess = () => { const r = g.result; if (!r) return; delete r.pending; s.put(r); };
+      });
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
     }));

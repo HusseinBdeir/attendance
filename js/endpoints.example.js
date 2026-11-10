@@ -1,11 +1,8 @@
-// Shape of js/endpoints.js (gitignored). Generate the real one with
-//   py scripts/att03_endpoints.py
-// which reads exports/att02_callback_url.txt + exports/att02_key.txt.
-// The app resolves the endpoint by site: sites[SITE] if present, else default.
+// Shape of js/endpoints.js. The app resolves the endpoint by site: sites[SITE] if present, else default.
+// Only the URL goes here. Never put a key in this file: the station key is typed on the tablet.
 const ATT_ENDPOINTS = {
-  generated: "",
-  default: { url: "", key: "" },
+  default: { url: "https://isabisystems.com/app/api/kiosk/verify" },
   sites: {
-    // LAUNA: { url: "https://…", key: "…" },
+    // LAUNA: { url: "https://example.invalid/other-endpoint" },
   },
 };
