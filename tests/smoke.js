@@ -1,6 +1,6 @@
 // Headless smoke test for the attendance kiosk.
 // Run:  node tests/smoke.js   (needs the repo served at http://localhost:8090)
-// Uses playwright-core from codex-hub + the installed Chrome. The camera is
+// Uses playwright-core (found or auto-installed, see loadPlaywright) + the installed Chrome. The camera is
 // replaced by injected frame sources (face crops from tests/faces/sample*.jpg);
 // the API is a mocked route that behaves like the Dataverse flow (upsert on id).
 
@@ -8,17 +8,34 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
+// playwright-core lookup, same on every PC (no OneDrive, no per-user paths):
+// PLAYWRIGHT_CORE, this repo, any sibling ~/bhfirms/<repo>/node_modules, the shared
+// ~/.theo/tools folder, then a normal require. If none has it, install it once into
+// ~/.theo/tools (the driver only; the test runs the installed Chrome).
 function loadPlaywright() {
-  const candidates = [
-    process.env.PLAYWRIGHT_CORE,
-    "C:/Users/hbdei/OneDrive - BHFIRMS/System/System/THEO/codex-hub-refinement/node_modules/playwright-core",
-    "C:/Users/HusseinBdeir/bhfirms/codex-hub/node_modules/playwright-core",
-    "playwright-core",
-  ].filter(Boolean);
-  for (const c of candidates) {
-    try { return require(c); } catch (_) {}
-  }
-  throw new Error("playwright-core not found in candidate paths");
+  const os = require("os");
+  const home = os.homedir();
+  const shared = path.join(home, ".theo", "tools");
+  const candidates = [process.env.PLAYWRIGHT_CORE, path.join(__dirname, "..", "node_modules", "playwright-core")];
+  try {
+    const bhfirms = path.join(home, "bhfirms");
+    for (const d of fs.readdirSync(bhfirms)) candidates.push(path.join(bhfirms, d, "node_modules", "playwright-core"));
+  } catch (_) {}
+  candidates.push(path.join(shared, "node_modules", "playwright-core"), "playwright-core");
+  const tryAll = () => {
+    for (const c of candidates.filter(Boolean)) {
+      try { return require(c); } catch (_) {}
+    }
+    return null;
+  };
+  let pw = tryAll();
+  if (pw) return pw;
+  console.log("playwright-core not found; installing it once into " + shared);
+  fs.mkdirSync(shared, { recursive: true });
+  require("child_process").execSync(`npm install --prefix "${shared}" --no-audit --no-fund playwright-core`, { stdio: "inherit" });
+  pw = tryAll();
+  if (pw) return pw;
+  throw new Error("playwright-core not found and the install into " + shared + " failed");
 }
 
 const { chromium } = loadPlaywright();
