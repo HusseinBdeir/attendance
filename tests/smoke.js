@@ -413,9 +413,16 @@ async function waitFor(page, fn, arg, timeout) {
   check("Alice's face rejected as a sample for Bilal", dup === false);
   await page.evaluate(() => ATT_TEST.closeManager());
 
-  console.log("5. kiosk: Alice punches IN via face");
+  console.log("5. kiosk: passive liveness ON by default blocks static 2D photo, then Alice punches IN");
   const day = await page.evaluate(() => { const d = new Date(), p = n => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; });
+  const defLive = await page.evaluate(() => ATT_TEST.state.liveness);
+  check("passive liveness is ON by default on boot (v0.7.0)", defLive === true, defLive);
   await page.evaluate(() => ATT_TEST.setFrameSource(window.__crop(0, 0.9, false, 0.8)));
+  await sleep(1600);
+  const staticBlockedPunches = await page.evaluate(d => ATT_TEST.db.punchesForDay(d), day);
+  check("NEGATIVE: default passive liveness blocks static 2D photo crop without blinking or moving",
+    staticBlockedPunches.length === 0, staticBlockedPunches.length);
+  await page.evaluate(() => ATT_TEST.setLiveness(false));
   await waitFor(page, async d => (await ATT_TEST.db.punchesForDay(d)).length === 1, day, 60000);
   let punches = await page.evaluate(d => ATT_TEST.db.punchesForDay(d), day);
   check("one punch", punches.length === 1);
@@ -448,7 +455,7 @@ async function waitFor(page, fn, arg, timeout) {
         const cv = document.createElement("canvas"); cv.width = Math.round(sw); cv.height = Math.round(sh);
         cv.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
         const det = await ATT_TEST.face.detectOne(cv);
-        if (det) { window.__unk = cv; const m = ATT_TEST.face.match(det.descriptor, faces); return { found: true, pad, distance: m && m.distance }; }
+        if (det && !det.multiple) { window.__unk = cv; const m = ATT_TEST.face.match(det.descriptor, faces); return { found: true, pad, distance: m && m.distance }; }
       }
     }
     return { found: false };
@@ -561,30 +568,31 @@ async function waitFor(page, fn, arg, timeout) {
   const big = await page.evaluate(() => ATT_TEST.detectFrame(window.__crop(0, 0.7, false, 1.0)));
   check("close face reports its frame fraction >= min", big.matched === true || big.reason !== "small", big);
 
-  console.log("15. liveness (blink) challenge");
+  console.log("15. passive zero-prompt liveness (blink + timeout)");
   await page.evaluate(async d => {
     ATT_TEST.setFrameSource(null);
     for (const p of await ATT_TEST.db.punchesForDay(d)) { if (p.staffName === "Alice A") { p.ts = new Date(Date.now() - 10 * 60000).toISOString(); await ATT_TEST.db.savePunch(p); } }
     await ATT_TEST.setLiveness(true);
-    window.__ears = [0.3, 0.3, 0.3, 0.15, 0.15, 0.3];
-    ATT_TEST.setLiveMock(() => ({ ear: window.__ears.length > 1 ? window.__ears.shift() : window.__ears[0], box: { x: 0, y: 0, width: 10, height: 10 } }));
+    const blinkCycle = [0.30, 0.30, 0.16, 0.30, 0.30];
+    window.__earIdx = 0;
+    ATT_TEST.setLiveMock(() => ({ ear: blinkCycle[(window.__earIdx++) % blinkCycle.length] }));
     ATT_TEST.hideCard();
     ATT_TEST.setFrameSource(window.__crop(0, 0.7, false, 1.0));
   }, day);
   await waitFor(page, async d => (await ATT_TEST.db.punchesForDay(d)).filter(p => p.staffName === "Alice A").length === 3, day, 30000);
   punches = await page.evaluate(d => ATT_TEST.db.punchesForDay(d), day);
   const live = punches.filter(p => p.staffName === "Alice A").sort((x, y) => x.ts.localeCompare(y.ts))[2];
-  check("punch only after the blink, note says so", live && live.method === "face" && /blink ok/.test(live.note), live && live.note);
-  // no blink within the window -> no punch
+  check("passive blink punches without interactive prompt, note says blink ok", live && live.method === "face" && /blink ok/.test(live.note), live && live.note);
+  // no blink or 3D turn within windowSec -> timeout hint, no punch
   await page.evaluate(async d => {
     for (const p of await ATT_TEST.db.punchesForDay(d)) { if (p.staffName === "Alice A") { p.ts = new Date(Date.now() - 10 * 60000).toISOString(); await ATT_TEST.db.savePunch(p); } }
-    window.__ears = [0.3];
+    ATT_TEST.setLiveMock(() => ({ ear: 0.30 }));
     ATT_TEST.hideCard();
   }, day);
-  await page.waitForFunction(() => document.getElementById("hint").textContent.includes("Blink not seen"), null, { timeout: 15000 });
+  await page.waitForFunction(() => document.getElementById("hint").textContent.includes("Live face not confirmed"), null, { timeout: 20000 });
   punches = await page.evaluate(d => ATT_TEST.db.punchesForDay(d), day);
-  check("no blink -> no punch, hint explains", punches.filter(p => p.staffName === "Alice A").length === 3);
-  await page.evaluate(async () => { await ATT_TEST.setLiveness(false); ATT_TEST.setLiveMock(null); ATT_TEST.setFrameSource(null); ATT_TEST.state.live = null; });
+  check("no passive blink or 3D turn -> no punch, neutral timeout hint", punches.filter(p => p.staffName === "Alice A").length === 3);
+  await page.evaluate(async () => { await ATT_TEST.setLiveness(false); ATT_TEST.setLiveMock(null); ATT_TEST.setFrameSource(null); });
 
   console.log("16. PIN lockout + hashed manager PIN");
   await page.click("#btnMgr");
@@ -1447,11 +1455,309 @@ async function waitFor(page, fn, arg, timeout) {
     scan.opened3 === true && scan.errClosed === true && /Scanner stopped/.test(scan.err.toast) && scan.err.scanStopped && scan.kioskBack3 === true, { err: scan.err, back: scan.kioskBack3 });
   check("NEGATIVE: cancelling while the scanner is still starting leaves the kiosk camera running",
     scan.earlyCancelBack === true && scan.earlyCancel.alive && scan.earlyCancel.noScanCamera && scan.earlyCancel.enVideo && scan.earlyCancel.closed, scan.earlyCancel);
+  console.log("23. v0.7.0 passive 3D liveness, descriptor stability, multi-person & pixel PAD");
+  const v070 = await page.evaluate(async d => {
+    const baseCv = window.__crop(0, 0.7, false, 1.0);
+    const det = await ATT_TEST.face.detectOne(baseCv);
+    const naturalPad = ATT_TEST.face.analyzePad(baseCv, det);
+
+    const makeSpoofCanvas = kind => {
+      const cv = document.createElement("canvas");
+      cv.width = baseCv.width; cv.height = baseCv.height;
+      const ctx = cv.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(baseCv, 0, 0);
+      const bx = Math.round(det.box.x), by = Math.round(det.box.y);
+      const bw = Math.round(det.box.width), bh = Math.round(det.box.height);
+      const img = ctx.getImageData(0, 0, cv.width, cv.height);
+      const p = img.data;
+      for (let y = 0; y < cv.height; y++) {
+        for (let x = 0; x < cv.width; x++) {
+          const idx = (y * cv.width + x) * 4;
+          const inFace = x >= bx && x < bx + bw && y >= by && y < by + bh;
+          if (kind === "moire" && inFace) {
+            const d = ((x % 2) === 0 ? 22 : -22) + ((y % 2) === 0 ? 12 : -12);
+            p[idx] = Math.max(0, Math.min(255, p[idx] + d));
+            p[idx + 1] = Math.max(0, Math.min(255, p[idx + 1] - d));
+            p[idx + 2] = Math.max(0, Math.min(255, p[idx + 2] + d));
+          } else if (kind === "pwm") {
+            const band = inFace ? (((y % 4) < 2) ? 24 : -24) : 0;
+            p[idx] = Math.max(0, Math.min(255, p[idx] + band));
+            p[idx + 1] = Math.max(0, Math.min(255, p[idx + 1] + band));
+            p[idx + 2] = Math.max(0, Math.min(255, p[idx + 2] + band));
+          } else if (kind === "bezel") {
+            const lx = bx - 8, rx = bx + bw + 8;
+            if ((x >= lx - 3 && x <= lx) || (x >= rx && x <= rx + 3)) {
+              p[idx] = 12; p[idx + 1] = 12; p[idx + 2] = 12;
+            } else if ((x > lx && x < lx + 4) || (x > rx - 4 && x < rx)) {
+              p[idx] = Math.max(150, p[idx]); p[idx + 1] = Math.max(150, p[idx + 1]); p[idx + 2] = Math.max(150, p[idx + 2]);
+            }
+          } else if (kind === "glare" && inFace) {
+            const rx = (x - bx) / bw, ry = (y - by) / bh;
+            if (rx >= 0.14 && rx <= 0.37 && ry >= 0.50 && ry <= 0.65) {
+              p[idx] = 252; p[idx + 1] = 252; p[idx + 2] = 252;
+            } else if (rx >= 0.14 && rx <= 0.86 && ry >= 0.08 && ry <= 0.90) {
+              p[idx] = 172; p[idx + 1] = 148; p[idx + 2] = 136;
+            }
+          } else if (kind === "glasses_glare" && inFace) {
+            const rx = (x - bx) / bw, ry = (y - by) / bh;
+            if (det.padEyeBox && rx >= det.padEyeBox.x0 && rx <= det.padEyeBox.x1 && ry >= det.padEyeBox.y0 && ry <= det.padEyeBox.y1) {
+              p[idx] = 252; p[idx + 1] = 252; p[idx + 2] = 252;
+            }
+          }
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      return cv;
+    };
+
+    const moireCv = makeSpoofCanvas("moire");
+    const pwmCv = makeSpoofCanvas("pwm");
+    const bezelCv = makeSpoofCanvas("bezel");
+    const glareCv = makeSpoofCanvas("glare");
+    const glassesCv = makeSpoofCanvas("glasses_glare");
+
+    const moirePad = ATT_TEST.face.analyzePad(moireCv, det);
+    const pwmPad = ATT_TEST.face.analyzePad(pwmCv, det);
+    const bezelPad = ATT_TEST.face.analyzePad(bezelCv, det);
+    const glarePad = ATT_TEST.face.analyzePad(glareCv, det);
+    const glassesPad = ATT_TEST.face.analyzePad(glassesCv, det);
+
+    await ATT_TEST.setLiveness(false);
+    const spoofWhileOff = await ATT_TEST.detectFrame(moireCv);
+
+    // Enrolment sample block on spoof & multi-person
+    const multiCv = document.createElement("canvas");
+    multiCv.width = baseCv.width * 2;
+    multiCv.height = baseCv.height;
+    const mctx = multiCv.getContext("2d");
+    mctx.drawImage(baseCv, 0, 0);
+    mctx.drawImage(window.__crop(1, 0.55, false, 1.0), baseCv.width, 0, baseCv.width, baseCv.height);
+
+    ATT_TEST.openManager();
+    ATT_TEST.selectEnrol("33333333-3333-3333-3333-333333333333");
+    const spoofEnrol = await ATT_TEST.captureSample(moireCv);
+    const multiEnrol = await ATT_TEST.captureSample(multiCv);
+    ATT_TEST.closeManager();
+
+    // Multi-person kiosk block
+    const multiKiosk = await ATT_TEST.detectFrame(multiCv);
+
+    // Passive liveness evaluator matrix
+    const mkH = (rows) => rows.map((r, i) => Object.assign({ t: i * 220, ear: 0.30, yaw: 0, parallax3d: 0, pitch: 0, parallaxPitch3d: 0, landmarkModel: "68", boxCx: 200, boxCy: 200, boxW: 160, padEvaluated: true, frameSpoof: false, padScore: 0 }, r));
+    const ev = (rows, o) => ATT_TEST.face.evaluatePassiveLiveness(mkH(rows), Object.assign({ mode: "blink_or_turn", requireRealtimeCadence: true, minFrames: 4, minSpanMs: 550 }, o || {}));
+    const lvOpenCloseOnly = ev([{ ear: 0.30 }, { ear: 0.30 }, { ear: 0.25 }, { ear: 0.16 }]);
+    const lvCloseOpenOnly = ev([{ ear: 0.16 }, { ear: 0.18 }, { ear: 0.28 }, { ear: 0.30 }]);
+    const lvUncoupled2D = ev([{ yaw: 0.0, parallax3d: 0.0, ear: 0.30 }, { yaw: 0.03, parallax3d: 0.001, ear: 0.31 }, { yaw: 0.06, parallax3d: -0.002, ear: 0.31 }, { yaw: 0.09, parallax3d: 0.001, ear: 0.32 }]);
+    const lvBoxJump = ev([{ ear: 0.30 }, { ear: 0.16 }, { ear: 0.30, boxCx: 290 }, { ear: 0.30, boxCx: 290 }]);
+    const lvFastBurst = ev([{ t: 0, ear: 0.30 }, { t: 80, ear: 0.16 }, { t: 160, ear: 0.30 }, { t: 240, ear: 0.30 }]);
+    const lvGoodBlink = ev([{ ear: 0.30 }, { ear: 0.16 }, { ear: 0.29 }, { ear: 0.30 }]);
+    const lvGoodTurn = ev([{ yaw: -0.02, parallax3d: -0.012, ear: 0.29 }, { yaw: 0.00, parallax3d: 0.000, ear: 0.295 }, { yaw: 0.03, parallax3d: 0.015, ear: 0.30 }, { yaw: 0.05, parallax3d: 0.024, ear: 0.305 }]);
+    const lvGoodNod = ev([{ pitch: -0.03, parallaxPitch3d: -0.012, ear: 0.29 }, { pitch: 0.0, parallaxPitch3d: 0.0, ear: 0.27 }, { pitch: 0.03, parallaxPitch3d: 0.012, ear: 0.255 }, { pitch: 0.05, parallaxPitch3d: 0.020, ear: 0.255 }]);
+    const lvJitter320 = ev([{ yaw: -0.014, parallax3d: -0.0065, ear: 0.295 }, { yaw: -0.004, parallax3d: -0.002, ear: 0.297 }, { yaw: 0.006, parallax3d: 0.0025, ear: 0.299 }, { yaw: 0.014, parallax3d: 0.0065, ear: 0.300 }]);
+    const mkTiltPts = (jawShift, eyeShift) => {
+      const pts = Array.from({ length: 68 }, () => ({ x: 100, y: 100 }));
+      pts[2] = { x: 100 - 80 * (1 + jawShift), y: 100 };
+      pts[30] = { x: 100, y: 100 };
+      pts[14] = { x: 100 + 80 * (1 - jawShift), y: 100 };
+      pts[27] = { x: 100, y: 70 };
+      pts[36] = { x: 100 - 52 * (1 + eyeShift), y: 70 };
+      pts[45] = { x: 100 + 52 * (1 - eyeShift), y: 70 };
+      pts[8] = { x: 100, y: 160 };
+      pts[48] = { x: 85, y: 130 };
+      pts[54] = { x: 115, y: 130 };
+      return pts;
+    };
+    const tiltSeq = [0, 0.02, 0.04, 0.06].map(y => ATT_TEST.face.pose(mkTiltPts(y, y / 1.35)));
+    const lvPlanarTilt = ev(tiltSeq.map((p, i) => ({ yaw: p.yaw, parallax3d: p.parallax3d, ear: 0.29 + i * 0.005 })));
+
+    // Descriptor stability <= 0.26
+    const vBase = new Array(128).fill(0);
+    const vNear = new Array(128).fill(0); vNear[0] = 0.20;
+    const vJump = new Array(128).fill(0); vJump[0] = 0.30;
+    const stabOk = ATT_TEST.face.checkDescriptorStability([vBase, vNear], 0.26);
+    const stabJump = ATT_TEST.face.checkDescriptorStability([vBase, vJump], 0.26);
+
+    // Server-Redacted 1:N + liveness ON: zero /fakeapi calls until passive 3D liveness completes
+    for (const p of await ATT_TEST.db.punchesForDay(d)) {
+      p.ts = new Date(Date.now() - 10 * 60000).toISOString();
+      await ATT_TEST.db.savePunch(p);
+    }
+    await ATT_TEST.setRedactedMode(true);
+    await ATT_TEST.setLiveness(true);
+    return {
+      naturalSpoof: naturalPad.frameSpoof,
+      moire: { spoof: moirePad.frameSpoof, reasons: moirePad.reasons },
+      pwm: { spoof: pwmPad.frameSpoof, reasons: pwmPad.reasons },
+      bezel: { spoof: bezelPad.frameSpoof, reasons: bezelPad.reasons },
+      glare: { spoof: glarePad.frameSpoof, reasons: glarePad.reasons },
+      glassesSpoof: glassesPad.frameSpoof,
+      glassesReasons: glassesPad.reasons,
+      spoofWhileOff,
+      spoofEnrol,
+      multiEnrol,
+      multiKiosk,
+      lvOpenCloseOnly: lvOpenCloseOnly.ok,
+      lvCloseOpenOnly: lvCloseOpenOnly.ok,
+      lvUncoupled2D: lvUncoupled2D.ok,
+      lvBoxJump: lvBoxJump.ok,
+      lvFastBurst: { ok: lvFastBurst.ok, reason: lvFastBurst.reason },
+      lvGoodBlink: { ok: lvGoodBlink.ok, method: lvGoodBlink.method },
+      lvGoodTurn: { ok: lvGoodTurn.ok, method: lvGoodTurn.method },
+      lvGoodNod: { ok: lvGoodNod.ok, method: lvGoodNod.method },
+      lvJitter320: lvJitter320.ok,
+      lvPlanarTilt: { ok: lvPlanarTilt.ok, maxPar: Math.max(...tiltSeq.map(p => Math.abs(p.parallax3d))) },
+      stabOk,
+      stabJump,
+    };
+  }, day);
+  check("v0.7.0 PAD: natural face photo passes while Moire/PWM/bezel/glare spoofs are flagged (eye/glasses glare preserved)",
+    v070.naturalSpoof === false && v070.moire.spoof && v070.moire.reasons.includes("moire_grid") &&
+    v070.pwm.spoof && v070.pwm.reasons.includes("pwm_banding") &&
+    v070.bezel.spoof && v070.bezel.reasons.includes("screen_bezel") &&
+    v070.glare.spoof && v070.glare.reasons.includes("planar_glare") &&
+    v070.glassesSpoof === false, v070);
+  check("NEGATIVE: PAD blocks spoofed screen even when liveness toggle is OFF, and blocks spoof/multi-person enrolment",
+    v070.spoofWhileOff && v070.spoofWhileOff.matched === false && v070.spoofWhileOff.reason === "pad-spoof" &&
+    v070.spoofEnrol === false && v070.multiEnrol === false &&
+    v070.multiKiosk && v070.multiKiosk.matched === false && v070.multiKiosk.reason === "multiple", v070);
+  check("v0.7.0 passive liveness rejects incomplete blink, 2D tilt, 320px jitter, box jump, burst <550ms; accepts blink + coupled 3D turn & nod",
+    !v070.lvOpenCloseOnly && !v070.lvCloseOpenOnly && !v070.lvUncoupled2D && !v070.lvBoxJump &&
+    !v070.lvJitter320 && !v070.lvPlanarTilt.ok && v070.lvPlanarTilt.maxPar < 0.005 &&
+    !v070.lvFastBurst.ok && v070.lvFastBurst.reason === "cadence_pending" &&
+    v070.lvGoodBlink.ok && v070.lvGoodTurn.ok && v070.lvGoodNod.ok &&
+    v070.stabOk === true && v070.stabJump === false, v070);
+
+  // Redacted 1:N + liveness ON must NOT call server verify before passive liveness completes
+  const verifyCallsBeforeLive = server.calls.filter(c => c === "verify").length;
+  const aliceVecForLive = [...server.faces.values()].find(f => f.staffId.startsWith("1111") && f.descriptor.length === 128).descriptor;
+  const redLiveRes = await page.evaluate(async ({ vec, day }) => {
+    ATT_TEST.hideCard();
+    ATT_TEST.resetLiveness();
+    const t0 = Date.now();
+    const poses = [
+      { yaw: -0.02, parallax3d: -0.012, ear: 0.29 },
+      { yaw: 0.00, parallax3d: 0.0, ear: 0.295 },
+      { yaw: 0.03, parallax3d: 0.015, ear: 0.30 },
+      { yaw: 0.05, parallax3d: 0.024, ear: 0.305 },
+    ];
+    let idx = 0;
+    ATT_TEST.setLiveMock(() => {
+      const p = poses[Math.min(idx, poses.length - 1)];
+      const res = { t: t0 + idx * 210, ear: p.ear, pose: p, box: { x: 100, y: 100, width: 160, height: 180 }, pad: { evaluated: true, frameSpoof: false, score: 0, reasons: [] } };
+      idx++;
+      return res;
+    });
+    const fakeDet = { box: { x: 100, y: 100, width: 160, height: 180 }, frac: 0.4, score: 0.9, ear: 0.3, pose: poses[0], landmarkModel: "68" };
+    // First 3 frames accumulate streak + await liveness (< 550 ms)
+    const r1 = await ATT_TEST.injectDescriptor(vec, null, fakeDet);
+    const r2 = await ATT_TEST.injectDescriptor(vec, null, fakeDet);
+    const r3 = await ATT_TEST.injectDescriptor(vec, null, fakeDet);
+    const punchesBefore = (await ATT_TEST.db.punchesForDay(day)).filter(p => p.staffName === "Alice A").length;
+    // 4th frame (>= 550 ms) satisfies passive 3D turn -> calls verify & punches
+    const r4 = await ATT_TEST.injectDescriptor(vec, null, fakeDet);
+    const punchesAfter = (await ATT_TEST.db.punchesForDay(day)).filter(p => p.staffName === "Alice A").length;
+    ATT_TEST.hideCard();
+    ATT_TEST.setLiveMock(null);
+    await ATT_TEST.setLiveness(false);
+    await ATT_TEST.setRedactedMode(false);
+    for (const p of await ATT_TEST.db.punchesForDay(day)) {
+      if (p.note && /3d liveness ok/.test(p.note)) await ATT_TEST.db.deletePunch(p.id);
+    }
+    return { r3, r4, punchesBefore, punchesAfter };
+  }, { vec: aliceVecForLive, day });
+  const verifyCallsDelta = server.calls.filter(c => c === "verify").length - verifyCallsBeforeLive;
+  check("NEGATIVE + POSITIVE: Redacted 1:N waits for passive liveness (0 oracle calls while pending), then unlocks on coupled 3D turn",
+    redLiveRes.r3 && redLiveRes.r3.reason === "awaiting-liveness" && redLiveRes.r4 && redLiveRes.r4.matched === true &&
+    redLiveRes.r4.liveness === "turn3d" && verifyCallsDelta === 1 && redLiveRes.punchesAfter === redLiveRes.punchesBefore + 1,
+    { redLiveRes, verifyCallsDelta });
+
+  // NEGATIVE: Unknown visitor blink MUST NOT carry over into a swapped static enrolled photo in the same box
+  const carryoverRes = await page.evaluate(async ({ vec, day }) => {
+    ATT_TEST.hideCard();
+    ATT_TEST.resetLiveness();
+    await ATT_TEST.setRedactedMode(false);
+    await ATT_TEST.setLiveness(true);
+    for (const p of await ATT_TEST.db.punchesForDay(day)) {
+      if (p.staffName === "Alice A") { p.ts = new Date(Date.now() - 10 * 60000).toISOString(); await ATT_TEST.db.savePunch(p); }
+    }
+    const punchesBefore = (await ATT_TEST.db.punchesForDay(day)).filter(p => p.staffName === "Alice A").length;
+    const t0 = Date.now();
+    const seq = [
+      { t: t0, ear: 0.30 },
+      { t: t0 + 280, ear: 0.16 },
+      { t: t0 + 560, ear: 0.30 },
+      { t: t0 + 780, ear: 0.30 },
+      { t: t0 + 960, ear: 0.30 },
+      { t: t0 + 1140, ear: 0.30 },
+    ];
+    let idx = 0;
+    ATT_TEST.setLiveMock(() => {
+      const s = seq[Math.min(idx++, seq.length - 1)];
+      return { t: s.t, ear: s.ear, pose: { yaw: 0, parallax3d: 0 }, box: { x: 100, y: 100, width: 160, height: 180 }, pad: { evaluated: true, frameSpoof: false, score: 0, reasons: [] } };
+    });
+    const fakeDet = { box: { x: 100, y: 100, width: 160, height: 180 }, frac: 0.4, score: 0.9, ear: 0.30, pose: { yaw: 0, parallax3d: 0 }, landmarkModel: "68" };
+    const unkVec = vec.map(v => -v);
+    const u1 = await ATT_TEST.injectDescriptor(unkVec, null, fakeDet);
+    const u2 = await ATT_TEST.injectDescriptor(unkVec, null, fakeDet);
+    const u3 = await ATT_TEST.injectDescriptor(unkVec, null, fakeDet);
+    const a1 = await ATT_TEST.injectDescriptor(vec, null, fakeDet);
+    const a2 = await ATT_TEST.injectDescriptor(vec, null, fakeDet);
+    const a3 = await ATT_TEST.injectDescriptor(vec, null, fakeDet);
+    const punchesAfter = (await ATT_TEST.db.punchesForDay(day)).filter(p => p.staffName === "Alice A").length;
+    ATT_TEST.setLiveMock(null);
+    ATT_TEST.resetLiveness();
+    ATT_TEST.hideCard();
+    return { u1, u2, u3, a1, a2, a3, punchesBefore, punchesAfter };
+  }, { vec: aliceVecForLive, day });
+  check("NEGATIVE: unknown visitor blink does NOT carry over to static enrolled photo in same box",
+    carryoverRes.u3.matched === false && carryoverRes.a3 && carryoverRes.a3.matched === false &&
+    carryoverRes.a3.reason === "awaiting-liveness" && carryoverRes.punchesAfter === carryoverRes.punchesBefore,
+    carryoverRes);
+
+  // One-time v0.7.0 passive liveness migration & persisted manual opt-out across reload
+  await page.evaluate(async () => {
+    await ATT_TEST.db.setMeta("liveness", false);
+    await ATT_TEST.db.setMeta("livenessPassive070", false);
+  });
+  await page.reload();
+  await page.waitForFunction(() => window.ATT_TEST && ATT_TEST.ready(), null, { timeout: 180000 });
+  const migUpgraded = await page.evaluate(async () => {
+    ATT_TEST.openManager();
+    await new Promise(r => setTimeout(r, 80));
+    const chk = document.querySelector("#setLive") ? document.querySelector("#setLive").checked : null;
+    ATT_TEST.closeManager();
+    return {
+      stateLive: ATT_TEST.state ? ATT_TEST.state.liveness : null,
+      liveness: await ATT_TEST.db.getMeta("liveness", null),
+      migrated: await ATT_TEST.db.getMeta("livenessPassive070", null),
+      chk,
+    };
+  });
+  await page.evaluate(() => ATT_TEST.setLiveness(false));
+  await page.reload();
+  await page.waitForFunction(() => window.ATT_TEST && ATT_TEST.ready(), null, { timeout: 180000 });
+  const migOptOut = await page.evaluate(async () => {
+    ATT_TEST.openManager();
+    await new Promise(r => setTimeout(r, 80));
+    const chk = document.querySelector("#setLive") ? document.querySelector("#setLive").checked : null;
+    ATT_TEST.closeManager();
+    return {
+      liveness: await ATT_TEST.db.getMeta("liveness", null),
+      migrated: await ATT_TEST.db.getMeta("livenessPassive070", null),
+      chk,
+    };
+  });
+  await page.evaluate(() => ATT_TEST.setLiveness(true));
+  check("v0.7.0 livenessPassive070 upgrades saved false->true once, then respects explicit opt-out on reload",
+    migUpgraded.liveness === true && migUpgraded.migrated === true && migUpgraded.chk === true &&
+    migOptOut.liveness === false && migOptOut.migrated === true && migOptOut.chk === false,
+    { migUpgraded, migOptOut });
+
   const leftover = await page.evaluate(async () => ({
     staff: (await ATT_TEST.db.unsyncedStaff()).length, punches: await ATT_TEST.db.unsyncedCount(), faces: (await ATT_TEST.db.unsyncedFaces()).length,
     key: await ATT_TEST.db.getMeta("apiKey", ""), version: ATT_CONFIG.version,
   }));
-  check("nothing is left queued and the app reports version 0.6.0", leftover.staff === 0 && leftover.punches === 0 && leftover.faces === 0 && leftover.key === "k" && leftover.version === "0.6.0", leftover);
+  check("nothing is left queued and the app reports version 0.7.0", leftover.staff === 0 && leftover.punches === 0 && leftover.faces === 0 && leftover.key === "k" && leftover.version === "0.7.0", leftover);
 
   check("no page errors", errors.length === 0, errors);
   console.log(`\n${pass} passed, ${fail} failed`);

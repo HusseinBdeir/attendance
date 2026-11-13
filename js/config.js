@@ -5,7 +5,7 @@
 // station key is typed once per tablet in Settings.
 
 const ATT_CONFIG = {
-  version: "0.6.0",
+  version: "0.7.0",
 
   // Site code -> company name (exact: the server matches the staff register on it).
   sites: {
@@ -67,15 +67,19 @@ const ATT_CONFIG = {
     poseIcons: ["straight", "left", "right"],
   },
 
-  // Liveness (anti-photo) check: after a face is recognised the kiosk asks for a
-  // blink and only punches once it sees one. Off by default; switch it on in
-  // Settings once recognition itself is tuned. Blink = eye aspect ratio dips below
-  // `earClosed` and recovers above `earOpen` within `windowSec`.
+  // Passive biometric liveness & pixel anti-spoof PAD:
+  // Zero prompts — passively requires natural Open->Dip->Open blink OR positively-coupled
+  // 3D yaw/pitch nose-vs-eye parallax (>= minFrames, >= minSpanMs), plus always-on native
+  // pixel PAD (Moire, PWM banding, bezels, planar glare) and descriptor step stability.
   liveness: {
-    enabled: false,
-    earClosed: 0.20,
-    earOpen: 0.26,
-    windowSec: 4,
+    enabled: true,
+    mode: "blink_or_turn",
+    minFrames: 4,
+    minSpanMs: 550,
+    maxStepDist: 0.26,
+    earClosed: 0.214,
+    earOpen: 0.238,
+    windowSec: 4.5,
   },
 
   punch: {

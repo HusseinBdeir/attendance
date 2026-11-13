@@ -23,10 +23,13 @@
     stream: null,
     running: false,
     busy: false,          // card up / keypad open / manager open -> detection paused
-    streak: { staffId: null, n: 0, dist: [] },
+    streak: { staffId: null, n: 0, dist: [], vecs: [] },
     unknown: 0,
-    live: null,           // blink challenge in progress {staffId, distance, weak, until, closed}
-    liveMock: null,       // tests replace the landmark reader
+    live: null,           // reserved test/legacy state (passive liveness uses livenessHist)
+    livenessHist: [],     // passive biometric liveness & PAD sliding window
+    livenessWaitStart: 0, // timestamp when stabilized match began waiting on passive liveness
+    lastDescVec: null,    // previous descriptor for cross-frame identity continuity
+    liveMock: null,       // tests can override ear/pose in recordLivenessFrame
     frameSource: null,    // tests inject an <img>/<canvas> instead of the camera
     lastPunchAt: new Map(),
     cardTimer: null,
@@ -641,6 +644,7 @@
     $("card").className = "card hidden";
     state.cardPunch = null;
     resetStreak();
+    resetLiveness();
     if (!Keypad.isOpen && !state.mgrOpen) state.busy = false;
     hint("Look at the camera");
   }
@@ -742,16 +746,68 @@
   }
 
   function resetStreak() {
-    state.streak = { staffId: null, n: 0, dist: [] };
+    state.streak = { staffId: null, n: 0, dist: [], vecs: [] };
     state.redactedStreak = [];
     setStreakProgress(0);
   }
+  function resetLiveness() {
+    state.livenessHist = [];
+    state.livenessWaitStart = 0;
+    state.lastDescVec = null;
+    state.live = null;
+  }
+  const passiveLiveCfg = () => ({
+    mode: (C.liveness && C.liveness.mode) || "blink_or_turn",
+    requireRealtimeCadence: true,
+    minFrames: Math.max(3, Number((C.liveness && C.liveness.minFrames) || 4)),
+    minSpanMs: Math.max(250, Number((C.liveness && C.liveness.minSpanMs) || 550)),
+  });
+  function recordLivenessFrame(det, src) {
+    const pad = Face.analyzePad(src, det);
+    const mock = (IS_TEST_ENV && typeof state.liveMock === "function") ? (state.liveMock(det) || {}) : null;
+    const effPad = (mock && mock.pad) ? mock.pad : pad;
+    const winMs = Math.max(2000, Number((C.liveness && C.liveness.windowSec) || 4.5) * 1000);
+    const now = (mock && typeof mock.t === "number") ? mock.t : Date.now();
+    const mPose = (mock && mock.pose) ? mock.pose : (det && det.pose);
+    const mBox = (mock && mock.box) ? mock.box : (det && det.box);
+    const entry = {
+      t: now,
+      ear: (mock && typeof mock.ear === "number") ? mock.ear : (det && typeof det.ear === "number" ? det.ear : null),
+      yaw: mPose && typeof mPose.yaw === "number" ? mPose.yaw : null,
+      parallax3d: mPose && typeof (mPose.parallax3d ?? mPose.parallax) === "number" ? (mPose.parallax3d ?? mPose.parallax) : null,
+      pitch: mPose && typeof mPose.pitch === "number" ? mPose.pitch : null,
+      parallaxPitch3d: mPose && typeof mPose.parallaxPitch3d === "number" ? mPose.parallaxPitch3d : null,
+      landmarkModel: (mock && mock.landmarkModel) || (det && det.landmarkModel) || Face.landmarks || "",
+      boxCx: mBox ? (mBox.x + mBox.width * 0.5) : null,
+      boxCy: mBox ? (mBox.y + mBox.height * 0.5) : null,
+      boxW: mBox ? mBox.width : 0,
+      padEvaluated: !!effPad.evaluated,
+      frameSpoof: !!effPad.frameSpoof,
+      padScore: Number(effPad.score || 0),
+      padReasons: Array.isArray(effPad.reasons) ? effPad.reasons.slice() : [],
+    };
+    state.livenessHist.push(entry);
+    const cutoff = now - winMs;
+    while (state.livenessHist.length > 36 || (state.livenessHist.length && state.livenessHist[0].t < cutoff)) {
+      state.livenessHist.shift();
+    }
+    const lv = Face.evaluatePassiveLiveness(state.livenessHist, passiveLiveCfg());
+    return { pad: effPad, lv };
+  }
 
-  // Frame-level gate (face size) then descriptor matching.
+  // Frame-level gate (multi-person, face size, PAD & passive liveness) then descriptor matching.
   async function handleDetection(det, src) {
+    if (det.multiple) {
+      resetStreak();
+      resetLiveness();
+      drawOverlay(det, "warn");
+      if (!state.busy) hint("One person in frame at a time", true);
+      return { matched: false, reason: "multiple" };
+    }
     if (det.frac < C.match.minFaceFrac) {
       if (state.frameSource || (state.missedFrames = (state.missedFrames || 0) + 1) >= 3) {
         resetStreak();
+        resetLiveness();
       }
       drawOverlay(det, "far");
       if (!state.busy) hint("Come closer to the camera");
@@ -764,8 +820,28 @@
   async function handleDescriptor(desc, src, det) {
     if (!isFiniteDesc128(desc)) {
       resetStreak();
+      resetLiveness();
       return { matched: false, reason: "bad-descriptor" };
     }
+    const arr = Array.from(desc);
+    const maxStep = (C.liveness && C.liveness.maxStepDist) || 0.26;
+    let { pad, lv } = det
+      ? recordLivenessFrame(det, src)
+      : { pad: { evaluated: false, frameSpoof: false, reasons: [] }, lv: Face.evaluatePassiveLiveness(state.livenessHist, passiveLiveCfg()) };
+    if (state.lastDescVec && !Face.checkDescriptorStability([state.lastDescVec, arr], maxStep)) {
+      state.livenessHist = det ? state.livenessHist.slice(-1) : [];
+      state.livenessWaitStart = 0;
+      lv = Face.evaluatePassiveLiveness(state.livenessHist, passiveLiveCfg());
+    }
+    state.lastDescVec = arr;
+    if (pad.frameSpoof || lv.spoofSuspected) {
+      resetStreak();
+      state.livenessWaitStart = 0;
+      drawOverlay(det, "warn");
+      if (!state.busy) hint("Live face required - remove screen or photo", true);
+      return { matched: false, reason: "pad-spoof", padReasons: (pad.reasons && pad.reasons.length) ? pad.reasons : (lv.padReasons || []) };
+    }
+
     const faces = usableFaces();
     const m = faces.length ? Face.match(desc, faces) : null;
     // Allow a small +0.05 tolerance on live camera frames 2..N for the same person so a slight head turn never resets the streak
@@ -774,27 +850,71 @@
     const v = Face.decide(m, effThreshold);
 
     if (v.ok) {
+      const priorUnknown = state.unknown > 0;
       state.unknown = 0;
       state.missedFrames = 0;
       state.redactedStreak = [];
-      if (state.streak.staffId === m.staffId) { state.streak.n++; state.streak.dist.push(m.distance); }
-      else state.streak = { staffId: m.staffId, n: 1, dist: [m.distance] };
-      const st = state.staff.get(m.staffId);
-      drawOverlay(det, "ok");
-      setStreakProgress(state.streak.n / C.match.confirmFrames);
-      hint(`Hello ${st ? st.name : ""}…`, false, "ok");
-      if (state.streak.n >= C.match.confirmFrames) {
-        const mean = state.streak.dist.reduce((a, b) => a + b, 0) / state.streak.dist.length;
-        const weak = mean > C.match.weakAbove;
-        resetStreak();
-        if (state.liveness) {
-          state.live = { staffId: m.staffId, distance: mean, weak, until: Date.now() + C.liveness.windowSec * 1000, closed: false };
-          hint("Please blink to confirm", false, "live");
-          return { matched: true, staffId: m.staffId, distance: m.distance, liveness: "pending" };
+      if (state.streak.staffId === m.staffId) {
+        const lastVec = state.streak.vecs[state.streak.vecs.length - 1];
+        if (lastVec && !Face.checkDescriptorStability([lastVec, arr], maxStep)) {
+          state.streak = { staffId: m.staffId, n: 1, dist: [m.distance], vecs: [arr] };
+          state.livenessHist = det ? state.livenessHist.slice(-1) : [];
+          state.livenessWaitStart = 0;
+          lv = Face.evaluatePassiveLiveness(state.livenessHist, passiveLiveCfg());
+        } else {
+          state.streak.n++;
+          state.streak.dist.push(m.distance);
+          state.streak.vecs.push(arr);
+          if (state.streak.dist.length > 8) state.streak.dist.shift();
+          if (state.streak.vecs.length > 8) state.streak.vecs.shift();
         }
-        await punch(m.staffId, "face", mean, src, null, weak ? `weak match ${r3(mean)}` : "");
+      } else {
+        if (state.streak.staffId || priorUnknown) {
+          state.livenessHist = det ? state.livenessHist.slice(-1) : [];
+          lv = Face.evaluatePassiveLiveness(state.livenessHist, passiveLiveCfg());
+        }
+        state.streak = { staffId: m.staffId, n: 1, dist: [m.distance], vecs: [arr] };
+        state.livenessWaitStart = 0;
       }
-      return { matched: true, staffId: m.staffId, distance: m.distance, margin: m.margin };
+      drawOverlay(det, "ok");
+      setStreakProgress(Math.min(1, state.streak.n / C.match.confirmFrames));
+      if (state.streak.n < C.match.confirmFrames) {
+        if (!state.busy) hint("Hold steady…", false, "ok");
+        return { matched: true, staffId: m.staffId, distance: m.distance, margin: m.margin, punched: false };
+      }
+
+      const avg = Face.averageDescriptors(state.streak.vecs.slice(-C.match.confirmFrames));
+      const mAvg = avg ? Face.match(avg, faces) : null;
+      const vAvg = Face.decide(mAvg, state.threshold);
+      if (!vAvg.ok) {
+        resetStreak();
+        resetLiveness();
+        drawOverlay(det, vAvg.reason === "ambiguous" ? "warn" : "unknown");
+        return { matched: false, distance: mAvg ? mAvg.distance : null, reason: vAvg.reason };
+      }
+
+      if (state.liveness && !lv.ok) {
+        state.livenessWaitStart = state.livenessWaitStart || Date.now();
+        if (Date.now() - state.livenessWaitStart > (C.liveness.windowSec || 4.5) * 1000) {
+          resetStreak();
+          resetLiveness();
+          drawOverlay(null);
+          if (!state.busy) hint("Live face not confirmed - look naturally at camera or tap Use PIN", true);
+          return { matched: false, reason: "liveness-timeout" };
+        }
+        drawOverlay(det, "live");
+        if (!state.busy) hint("Verifying live face…", false, "live");
+        return { matched: false, staffId: mAvg.staffId, reason: "awaiting-liveness", livenessReason: lv.reason };
+      }
+
+      const mean = mAvg.distance;
+      const weak = mean > C.match.weakAbove;
+      const liveNote = state.liveness ? (lv.blinkPassed ? "blink ok" : "3d liveness ok") : "";
+      const note = [weak ? `weak match ${r3(mean)}` : "", liveNote].filter(Boolean).join("; ");
+      resetStreak();
+      resetLiveness();
+      await punch(mAvg.staffId, "face", mean, (src && src._rawSource) || src, null, note);
+      return { matched: true, staffId: mAvg.staffId, distance: mean, margin: mAvg.margin, punched: true, liveness: lv.method || "off" };
     }
 
     // In Server-Redacted 1:N Mode, fall through to server verify whenever no local vector matched
@@ -803,25 +923,44 @@
       const activeCount = [...state.staff.values()].filter(s => s.active !== false).length;
       if (!activeCount) {
         resetStreak();
+        resetLiveness();
         state.unknown++;
         drawOverlay(det, "unknown");
         if (state.unknown >= C.match.unknownFrames && !state.busy) hint("No enrolments yet - tap Use PIN", true);
         return { matched: false, reason: "no-enrolments", redacted: true };
       }
-      const arr = Array.from(desc);
       if (state.redactedStreak.length) {
         const prev = state.redactedStreak[state.redactedStreak.length - 1];
-        if (dist128(arr, prev) > 0.34) state.redactedStreak = [];
+        if (!Face.checkDescriptorStability([prev, arr], maxStep)) {
+          state.redactedStreak = [];
+          state.livenessHist = det ? state.livenessHist.slice(-1) : [];
+          state.livenessWaitStart = 0;
+          lv = Face.evaluatePassiveLiveness(state.livenessHist, passiveLiveCfg());
+        }
       }
       state.redactedStreak.push(arr);
-      setStreakProgress(state.redactedStreak.length / C.match.confirmFrames);
+      if (state.redactedStreak.length > 8) state.redactedStreak.shift();
+      setStreakProgress(Math.min(1, state.redactedStreak.length / C.match.confirmFrames));
       drawOverlay(det, "scan");
       if (state.redactedStreak.length < C.match.confirmFrames) {
         if (!state.busy) hint("Hold steady…", false, "ok");
         return { matched: false, reason: "stabilizing", streak: state.redactedStreak.length, redacted: true };
       }
+      if (state.liveness && !lv.ok) {
+        state.livenessWaitStart = state.livenessWaitStart || Date.now();
+        if (Date.now() - state.livenessWaitStart > (C.liveness.windowSec || 4.5) * 1000) {
+          resetStreak();
+          resetLiveness();
+          drawOverlay(null);
+          if (!state.busy) hint("Live face not confirmed - look naturally at camera or tap Use PIN", true);
+          return { matched: false, reason: "liveness-timeout", redacted: true };
+        }
+        drawOverlay(det, "live");
+        if (!state.busy) hint("Verifying live face…", false, "live");
+        return { matched: false, reason: "awaiting-liveness", livenessReason: lv.reason, redacted: true };
+      }
       if (state.verifyingRedacted) return { matched: false, reason: "verifying", redacted: true };
-      const probe = avgDescriptors(state.redactedStreak.slice(-C.match.confirmFrames));
+      const probe = Face.averageDescriptors(state.redactedStreak.slice(-C.match.confirmFrames));
       state.redactedStreak = [];
       if (!probe) return { matched: false, reason: "bad-descriptor", redacted: true };
       state.verifyingRedacted = true;
@@ -835,15 +974,14 @@
           state.unknown = 0;
           state.missedFrames = 0;
           drawOverlay(det, "ok");
-          if (state.liveness) {
-            state.live = { staffId: vr.staffId, distance: null, weak: !!vr.weak, until: Date.now() + C.liveness.windowSec * 1000, closed: false };
-            hint("Please blink to confirm", false, "live");
-            return { matched: true, staffId: vr.staffId, liveness: "pending", redacted: true };
-          }
-          await punch(vr.staffId, "face", null, src, null, vr.weak ? "weak match (server)" : "");
-          return { matched: true, staffId: vr.staffId, weak: !!vr.weak, redacted: true };
+          const liveNote = state.liveness ? (lv.blinkPassed ? "blink ok" : "3d liveness ok") : "";
+          const note = [vr.weak ? "weak match (server)" : "", liveNote].filter(Boolean).join("; ");
+          resetLiveness();
+          await punch(vr.staffId, "face", null, (src && src._rawSource) || src, null, note);
+          return { matched: true, staffId: vr.staffId, weak: !!vr.weak, redacted: true, liveness: lv.method || "off" };
         }
         setStreakProgress(0);
+        resetLiveness();
         const rsn = (vr && vr.matched && (!matchedSt || matchedSt.active === false)) ? "inactive" : ((vr && vr.reason) || "far");
         state.unknown = Math.max(state.unknown + 1, C.match.unknownFrames);
         drawOverlay(det, rsn === "ambiguous" ? "warn" : "unknown");
@@ -868,6 +1006,7 @@
     }
     resetStreak();
     state.unknown++;
+    if (state.unknown >= C.match.unknownFrames || v.reason === "ambiguous") resetLiveness();
     drawOverlay(det, v.reason === "ambiguous" ? "warn" : "unknown");
     if (state.unknown >= C.match.unknownFrames && !state.busy) {
       if (v.reason === "no-enrolments") hint("No enrolments yet — tap Use PIN", true);
@@ -877,31 +1016,9 @@
     return { matched: false, distance: m ? m.distance : null, reason: v.reason, margin: m ? m.margin : null };
   }
 
-  // Blink challenge: fast landmark loop until the eyes close and reopen.
-  async function livenessStep(src) {
-    const L = state.live;
-    if (Date.now() > L.until) {
-      state.live = null; drawOverlay(null);
-      hint("Blink not seen — try again or use PIN", true);
-      return 120;
-    }
-    const r = state.liveMock ? state.liveMock() : await Face.landmarksOnly(src);
-    if (r && r.ear != null) {
-      drawOverlay(r, "live");
-      if (r.ear < C.liveness.earClosed) L.closed = true;
-      else if (L.closed && r.ear > C.liveness.earOpen) {
-        state.live = null;
-        const weakTag = L.weak ? (L.distance != null ? `weak match ${r3(L.distance)}; ` : "weak match (server); ") : "";
-        await punch(L.staffId, "face", L.distance, src, null, weakTag + "blink ok");
-        return 120;
-      }
-    }
-    return 35;
-  }
-
   async function loop() {
     if (!state.running) return;
-    let delay = state.frameSource ? 250 : 85;
+    let delay = state.frameSource ? 120 : 85;
     try {
       if (!state.busy && Face.ready) {
         const src = state.frameSource || $("video");
@@ -929,21 +1046,19 @@
         }
         const ok = state.frameSource || (src.readyState >= 2 && src.videoWidth > 0);
         if (ok) {
-          if (state.live) delay = await livenessStep(src);
-          else {
-            const det = await Face.detectOne(src);
-            if (det) {
-              state.missedFrames = 0;
-              await handleDetection(det, src);
-              delay = state.frameSource ? 200 : 45;
-            } else {
-              state.missedFrames = (state.missedFrames || 0) + 1;
-              if (state.frameSource || state.missedFrames >= 3) {
-                resetStreak();
-                drawOverlay(null);
-                if (state.unknown) state.unknown = 0;
-                if (!state.busy) hint("Look at the camera");
-              }
+          const det = await Face.detectOne(src);
+          if (det) {
+            state.missedFrames = 0;
+            await handleDetection(det, src);
+            delay = state.frameSource ? 120 : 85;
+          } else {
+            state.missedFrames = (state.missedFrames || 0) + 1;
+            if (state.frameSource || state.missedFrames >= 3) {
+              resetStreak();
+              resetLiveness();
+              drawOverlay(null);
+              if (state.unknown) state.unknown = 0;
+              if (!state.busy) hint("Look at the camera");
             }
           }
         }
@@ -954,7 +1069,7 @@
 
   // ---------- staff PIN ----------
   $("btnPin").addEventListener("click", () => {
-    state.live = null;
+    resetLiveness();
     Keypad.open("Enter your PIN", async pin => {
       if (pin === null) return;
       const h = await sha256(pin);
@@ -991,7 +1106,7 @@
     await updateAttendanceAppBadge();
   }
   $("btnMgr").addEventListener("click", () => {
-    state.live = null;
+    resetLiveness();
     Keypad.open("Manager PIN", async pin => {
       if (pin === null) return;
       if (!(await managerPinOk(pin))) return false;
@@ -1011,7 +1126,7 @@
     });
   }
   function openManager() {
-    state.mgrOpen = true; state.busy = true; state.live = null;
+    state.mgrOpen = true; state.busy = true; resetStreak(); resetLiveness();
     state.enFilter = "all"; state.stFilter = "all"; state.logFilter = "all";
     if ($("enSearch")) $("enSearch").value = "";
     if ($("stSearch")) $("stSearch").value = "";
@@ -1098,8 +1213,9 @@
     if (cv.width !== tw || cv.height !== th) { cv.width = tw; cv.height = th; }
     cv._scaleX = v.videoWidth / tw;
     cv._scaleY = v.videoHeight / th;
+    cv._rawSource = v;
     cv._isLiveEnrolVideo = true;
-    cv.getContext("2d").drawImage(v, 0, 0, tw, th);
+    (cv.getContext("2d", { willReadFrequently: true }) || cv.getContext("2d")).drawImage(v, 0, 0, tw, th);
     return cv;
   }
 
@@ -1172,7 +1288,8 @@
         const src = enrolFrame();
         if (src) {
           const det = await Face.detectOne(src);
-          if (det && det.descriptor && det.frac >= C.match.minFaceFrac && det.score >= C.match.enrolScore) {
+          const padOk = !det || (!det.multiple && !Face.analyzePad(src, det).frameSpoof);
+          if (det && padOk && det.descriptor && det.frac >= C.match.minFaceFrac && det.score >= C.match.enrolScore) {
             state.lastEnrolDet = det;
             state.lastEnrolDetAt = Date.now();
             state.enrolSteady = (state.enrolSteady || 0) + 1;
@@ -1239,8 +1356,11 @@
     // a turned pose that finds no face is almost always a FULL turn (profile hides an eye)
     const turning = ["left", "right"].includes(poseIcon(Math.min(state.enrol.samples.length, C.match.poses.length - 1)));
     if (!det) { toast(turning ? "No face found — turn only a little, both eyes must stay in view" : "No face found — look straight at the camera", true); return false; }
+    if (det.multiple) { toast("Multiple faces in view — enrol one person at a time", true); return false; }
     if (det.frac < C.match.minFaceFrac) { toast("Too far — come closer to the camera", true); return false; }
     if (det.score < C.match.enrolScore) { toast(turning ? "Face not clear enough — turn less, more light" : "Face not clear enough — more light, look straight", true); return false; }
+    const pad = Face.analyzePad(src, det);
+    if (pad.frameSpoof) { toast("Live face required — do not enrol from a screen or photo", true); return false; }
     // reject a sample that already matches someone ELSE's enrolment (local or server-redacted)
     const other = usableFaces().filter(f => f.staffId !== state.enrol.staffId);
     const m = other.length ? Face.match(det.descriptor, other) : null;
@@ -1261,7 +1381,7 @@
         return false;
       }
     }
-    state.enrol.samples.push({ d: Array.from(det.descriptor), thumb: snapshot(src) });
+    state.enrol.samples.push({ d: Array.from(det.descriptor), thumb: snapshot((src && src._rawSource) || src) });
     Sound.play("capture");
     renderSamples();
     return true;
@@ -1408,7 +1528,10 @@
       if (!src) big("wait", "Camera starting…", state.stream ? "" : "no camera stream — check the camera permission");
       else {
         const det = await Face.detectOne(src);
+        const pad = det ? Face.analyzePad(src, det) : null;
         if (!det) big("wait", "No face in view");
+        else if (det.multiple) big("bad", "✗ Multiple faces in view", "stand one person in front of the camera");
+        else if (pad && pad.frameSpoof) big("bad", "✗ Screen or photo blocked", "PAD flagged: " + esc((pad.reasons || []).join(", ")));
         else if (det.frac < C.match.minFaceFrac) big("wait", "Come closer", `face is ${Math.round(det.frac * 100)}% of the frame, minimum ${Math.round(C.match.minFaceFrac * 100)}%`);
         else {
           // Unsaved captures of the person being enrolled count too (they replace that
@@ -1751,7 +1874,7 @@
     $("setInfo").textContent = [
       `version ${C.version} · face backend ${Face.backend} · detector ${Face.detector} · landmarks ${Face.landmarks} · models ${Face.ready ? "ready" : "loading"}`,
       `roster ${state.staff.size} staff · ${state.faces.length} raw vectors on device · redacted 1:N ${state.redactedMode ? "ON" : "off"} · ${pending} punches pending`,
-      `match threshold ${state.threshold} (default ${C.match.threshold}) · runner-up margin ${C.match.margin} · min face ${Math.round(C.match.minFaceFrac * 100)}% of frame · confirm ${C.match.confirmFrames} frames · liveness ${state.liveness ? "ON (blink)" : "off"}`,
+      `match threshold ${state.threshold} (default ${C.match.threshold}) · runner-up margin ${C.match.margin} · min face ${Math.round(C.match.minFaceFrac * 100)}% of frame · confirm ${C.match.confirmFrames} frames · liveness ${state.liveness ? "ON (passive blink/3D + PAD)" : "off (PAD active)"}`,
       `online ${navigator.onLine} · last sync ${l.at ? l.at.toLocaleString() + " " + (l.ok === false ? "FAILED " : "") + l.msg : "never"}`,
       (ep => {
         let host = "";
@@ -2061,6 +2184,11 @@
       await DBX.requeueForCloudMove();
       await DBX.setMeta("cloudMove050", true);
     }
+    // v0.7.0: enable passive blink/3D liveness by default once on tablets that previously saved the old off default.
+    if (!(await DBX.getMeta("livenessPassive070", false))) {
+      await DBX.setMeta("liveness", true);
+      await DBX.setMeta("livenessPassive070", true);
+    }
   }
   async function boot() {
     tickClock(); setInterval(tickClock, 1000);
@@ -2112,13 +2240,15 @@
       migrate,
       renderLists: () => { renderStaff(); renderEnrolList(""); renderManualList(""); },
       descriptorsFromImage: async el => (await Face.detectAll(el)).map(r => ({ d: Array.from(r.descriptor), box: r.box, score: r.score, frac: r.frac })),
-      injectDescriptor: (d, src) => handleDescriptor(Array.isArray(d) ? d : new Float32Array(d), src || null),
+      injectDescriptor: (d, src, det) => handleDescriptor(Array.isArray(d) ? d : new Float32Array(d), src || null, det || null),
       detectFrame: async src => { const det = await Face.detectOne(src); return det ? handleDetection(det, src) : { matched: false, reason: "no-face" }; },
       selectEnrol, captureSample, saveEnrolment, renderLog, poseSvg, enrolFrame,
       setEnrolConsent: v => { $("enConsent").checked = v; renderSamples(); },
       setEnrolPin: async pin => { state.enrol.pin = { pin, hash: await sha256(pin) }; renderSamples(); },
       setManagerPin, managerPinOk,
-      setLiveness: async v => { await DBX.setMeta("liveness", v); state.liveness = v; },
+      setLiveness: async v => { await DBX.setMeta("liveness", v); state.liveness = v; resetStreak(); resetLiveness(); },
+      recordLivenessSample: entry => { state.livenessHist.push(entry); },
+      resetLiveness,
       setRedactedMode: async v => {
         const res = await applyRedactedModeTransition(!!v);
         await loadData();
